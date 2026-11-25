@@ -3,8 +3,9 @@
 An OBS Studio source that receives the camera and microphone of a phone running [Niriun](https://github.com/leoberbert/Niriun),
 and tells the phone when the source is **on air** or in **preview** (tally).
 
-It is a fork of [droidcam-obs-plugin](https://github.com/dev47apps/droidcam-obs-plugin) (GPL-2.0-or-later) by Dev47Apps, with
-the DroidCam protocol replaced by Niriun's. It is the PC side of the Niriun protocol, so **nothing else has to be installed
+It started from [droidcam-obs-plugin](https://github.com/dev47apps/droidcam-obs-plugin) (GPL-2.0-or-later) by Dev47Apps, version 2.5.1
+(commit `ddfa888`). This repository is independent, not a GitHub fork, and does not follow the upstream; its history still contains the original
+commits. The DroidCam protocol was replaced by Niriun's. The plugin is the PC side of the Niriun protocol, so **nothing else has to be installed
 on the computer**: no Iriun Webcam client, no virtual camera driver, no OBS WebSocket.
 
 ```
