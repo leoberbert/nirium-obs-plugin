@@ -1,18 +1,28 @@
-name: Build
+name: CI
 
 on:
   push:
+    branches: [master]
   pull_request:
   workflow_dispatch:
+  workflow_call:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
 
 env:
-  # OBS Studio release whose DLLs and headers the plugin is built against (see scripts/fetch-windows-deps.ps1).
+  # Versão do OBS Studio usada para os cabeçalhos e DLLs (veja scripts/fetch-windows-deps.ps1).
   OBS_VERSION: "32.2.2"
 
 jobs:
   protocol-tests:
-    name: Protocol unit tests
+    name: Testes do protocolo
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - run: cmake -S . -B build -DNIRIUN_BUILD_PLUGIN=OFF
@@ -20,33 +30,36 @@ jobs:
       - run: ctest --test-dir build --output-on-failure
 
   windows:
-    name: Windows x64 plugin
+    name: Plugin Windows x64
     runs-on: windows-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: pwsh
     steps:
       - uses: actions/checkout@v4
 
-      - name: Download OBS Studio (only its DLLs are used, to make import libraries)
-        shell: pwsh
+      - name: Baixar o OBS Studio (só as DLLs, para gerar as bibliotecas de importação)
         run: |
           Invoke-WebRequest "https://github.com/obsproject/obs-studio/releases/download/$env:OBS_VERSION/OBS-Studio-$env:OBS_VERSION-Windows-x64.zip" -OutFile obs.zip
           Expand-Archive obs.zip -DestinationPath obs
 
-      - name: Prepare headers and import libraries
-        shell: pwsh
+      - name: Preparar cabeçalhos e bibliotecas
         run: ./scripts/fetch-windows-deps.ps1 -ObsDir "$PWD\obs" -ObsTag $env:OBS_VERSION -OutDir "$PWD\deps"
 
-      - name: Configure and build
-        shell: pwsh
+      # Sem -G: o CMake usa o Visual Studio mais novo da imagem (2022 ou 2026).
+      - name: Compilar e testar
         run: |
-          cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -DNIRIUN_DEPS_DIR="$PWD\deps"
+          $PSNativeCommandUseErrorActionPreference = $true
+          $ErrorActionPreference = 'Stop'
+          cmake -S . -B build -A x64 -DNIRIUN_DEPS_DIR="$PWD\deps"
           cmake --build build --config RelWithDebInfo
           ctest --test-dir build -C RelWithDebInfo --output-on-failure
-
-      - name: Package
-        shell: pwsh
-        run: cmake --install build --config RelWithDebInfo --prefix dist
+          cmake --install build --config RelWithDebInfo --prefix dist
 
       - uses: actions/upload-artifact@v4
         with:
           name: niriun-obs-windows-x64
           path: dist
+          if-no-files-found: error
+          retention-days: 7

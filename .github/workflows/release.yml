@@ -1,77 +1,129 @@
 name: Release
 
-# Gera o instalador (.exe) e o pacote portátil (.zip) do plugin para Windows x64.
-#   - git tag v0.1.0 && git push origin v0.1.0   -> compila e publica a release
-#   - Actions > Release > Run workflow             -> compila e guarda os arquivos como artefatos
+# Somente manual: Actions > Release > Run workflow.
+# Compila o plugin, gera o instalador (.exe) e o pacote portátil (.zip) e publica uma GitHub Release.
 
 on:
-  push:
-    tags: ["v*"]
   workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag da release (ex.: v0.1.0). Deve ser igual à versão em CMakeLists.txt (project VERSION)."
+        required: true
+        type: string
+      prerelease:
+        description: "Marcar como pré-release"
+        required: false
+        default: false
+        type: boolean
+
+concurrency:
+  group: release
+  cancel-in-progress: false
 
 permissions:
   contents: write
 
 env:
-  # Versão do OBS Studio usada para os cabeçalhos e DLLs (veja scripts/fetch-windows-deps.ps1).
   OBS_VERSION: "32.2.2"
 
 jobs:
-  windows:
-    name: Instalador e pacote portátil (Windows x64)
+  # Só publica a partir da branch padrão e com a tag coerente com a versão do CMake.
+  validate:
+    name: Validar tag
+    runs-on: ubuntu-latest
+    steps:
+      - name: Exigir a branch padrão
+        if: github.ref != format('refs/heads/{0}', github.event.repository.default_branch)
+        run: |
+          echo "::error::Release só pode ser gerada a partir de ${{ github.event.repository.default_branch }} (atual: ${{ github.ref }})."
+          exit 1
+
+      - uses: actions/checkout@v4
+
+      - name: Conferir tag e versão
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-].+)?$ ]]; then
+            echo "::error::A tag deve ter o formato v0.1.0 (sufixo opcional)."
+            exit 1
+          fi
+          CMAKE_VERSION=$(sed -n 's/^project(niriun-obs VERSION \([0-9.]*\).*/\1/p' CMakeLists.txt | head -n 1)
+          if [ "${TAG#v}" != "$CMAKE_VERSION" ]; then
+            echo "::error::A tag $TAG não bate com a versão $CMAKE_VERSION de CMakeLists.txt. Ajuste a versão antes."
+            exit 1
+          fi
+          if git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null 2>&1; then
+            echo "::error::A tag $TAG já existe."
+            exit 1
+          fi
+
+  test:
+    name: Testes
+    needs: validate
+    uses: ./.github/workflows/ci.yml
+
+  release:
+    name: Instalador, pacote portátil e GitHub Release
+    needs: [validate, test]
     runs-on: windows-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      VERSION: ${{ inputs.tag }}
     steps:
       - uses: actions/checkout@v4
 
-      - name: Versão
-        id: ver
-        shell: pwsh
-        run: |
-          $v = if ($env:GITHUB_REF -like 'refs/tags/v*') { $env:GITHUB_REF_NAME.TrimStart('v') } else { '0.0.0-dev' }
-          "version=$v" >> $env:GITHUB_OUTPUT
-
-      - name: Baixar o OBS Studio (só as DLLs, para gerar as bibliotecas de importação)
-        shell: pwsh
+      - name: Baixar o OBS Studio (só as DLLs)
         run: |
           Invoke-WebRequest "https://github.com/obsproject/obs-studio/releases/download/$env:OBS_VERSION/OBS-Studio-$env:OBS_VERSION-Windows-x64.zip" -OutFile obs.zip
           Expand-Archive obs.zip -DestinationPath obs
 
       - name: Preparar cabeçalhos e bibliotecas
-        shell: pwsh
         run: ./scripts/fetch-windows-deps.ps1 -ObsDir "$PWD\obs" -ObsTag $env:OBS_VERSION -OutDir "$PWD\deps"
 
-      - name: Compilar e testar
-        shell: pwsh
+      - name: Compilar
         run: |
-          cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -DNIRIUN_DEPS_DIR="$PWD\deps"
+          $PSNativeCommandUseErrorActionPreference = $true
+          $ErrorActionPreference = 'Stop'
+          cmake -S . -B build -A x64 -DNIRIUN_DEPS_DIR="$PWD\deps"
           cmake --build build --config RelWithDebInfo
-          ctest --test-dir build -C RelWithDebInfo --output-on-failure
           cmake --install build --config RelWithDebInfo --prefix dist
 
       - name: Pacote portátil (.zip)
-        shell: pwsh
         run: |
+          $ErrorActionPreference = 'Stop'
+          $v = $env:VERSION.TrimStart('v')
           New-Item -ItemType Directory -Force dist-installer | Out-Null
           Copy-Item LICENSE, README.md dist\
-          Compress-Archive -Path dist\* -DestinationPath "dist-installer\niriun-obs-${{ steps.ver.outputs.version }}-windows-x64-portable.zip"
+          Compress-Archive -Path dist\* -DestinationPath "dist-installer\niriun-obs-$v-windows-x64-portable.zip"
 
       - name: Instalador (.exe, Inno Setup)
-        shell: pwsh
         run: |
+          $ErrorActionPreference = 'Stop'
+          $v = $env:VERSION.TrimStart('v')
           if (-not (Get-Command iscc -ErrorAction SilentlyContinue)) { choco install innosetup -y --no-progress }
           $iscc = (Get-Command iscc -ErrorAction SilentlyContinue)?.Source
           if (-not $iscc) { $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" }
-          & $iscc "/DAppVersion=${{ steps.ver.outputs.version }}" installer\niriun-obs.iss
+          & $iscc "/DAppVersion=$v" installer\niriun-obs.iss
           if ($LASTEXITCODE -ne 0) { throw "ISCC falhou" }
 
-      - uses: actions/upload-artifact@v4
-        with:
-          name: niriun-obs-windows-x64
-          path: dist-installer/*
+      - name: SHA256SUMS
+        run: |
+          Set-Location dist-installer
+          Get-ChildItem -File | ForEach-Object { "{0}  {1}" -f (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower(), $_.Name } | Set-Content -Encoding ascii SHA256SUMS.txt
+          Get-Content SHA256SUMS.txt
 
-      - name: Publicar a release
-        if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v2
-        with:
-          files: dist-installer/*
-          generate_release_notes: true
+      - name: Publicar a GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PRERELEASE: ${{ inputs.prerelease }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $flags = @()
+          if ($env:PRERELEASE -eq 'true') { $flags += '--prerelease' }
+          gh release create $env:VERSION dist-installer/* --target $env:GITHUB_SHA --title "Niriun para OBS $env:VERSION" --generate-notes @flags
+          if ($LASTEXITCODE -ne 0) { throw "gh release create falhou" }

@@ -7,7 +7,7 @@
 
 <p align="center">
   <a href="https://github.com/leoberbert/nirium-obs-plugin/releases/latest"><img src="https://img.shields.io/github/v/release/leoberbert/nirium-obs-plugin?style=for-the-badge&logo=github&color=blue" alt="Última versão"></a>
-  <a href="https://github.com/leoberbert/nirium-obs-plugin/actions/workflows/build.yml"><img src="https://img.shields.io/github/actions/workflow/status/leoberbert/nirium-obs-plugin/build.yml?style=for-the-badge&logo=githubactions&logoColor=white&label=CI" alt="CI"></a>
+  <a href="https://github.com/leoberbert/nirium-obs-plugin/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/leoberbert/nirium-obs-plugin/ci.yml?style=for-the-badge&logo=githubactions&logoColor=white&label=CI" alt="CI"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/licen%C3%A7a-GPL--2.0--or--later-green?style=for-the-badge" alt="Licença GPL"></a>
 </p>
 
@@ -166,14 +166,12 @@ Linux e macOS: `cmake -S . -B build` com `libobs`, `obs-frontend-api` e FFmpeg d
 
 ### 🤖 Gerar o instalador (GitHub Actions)
 
-O workflow [`release.yml`](.github/workflows/release.yml) compila o plugin e gera o instalador (`.exe`, Inno Setup) e o pacote portátil (`.zip`):
+O workflow [`release.yml`](.github/workflows/release.yml) é **manual** e publica uma GitHub Release com o instalador (`.exe`, Inno Setup), o pacote portátil (`.zip`) e o `SHA256SUMS.txt`:
 
-```bash
-git tag v0.1.0
-git push origin v0.1.0        # compila, gera os dois arquivos e publica a release
-```
+1. Ajuste a versão em `CMakeLists.txt` (`project(niriun-obs VERSION x.y.z ...)`) e faça merge na `master`.
+2. **Actions → Release → Run workflow**, informando a tag `vx.y.z` (e marcando *prerelease*, se for o caso).
 
-Também dá para rodar manualmente em **Actions → Release → Run workflow**: os arquivos ficam como artefatos da execução. O workflow [`build.yml`](.github/workflows/build.yml) compila e testa a cada push.
+O workflow confere a tag, roda o CI, compila e publica. Detalhes em [`docs/ci-cd.md`](docs/ci-cd.md). O [`ci.yml`](.github/workflows/ci.yml) compila e testa a cada push na `master` e em pull requests.
 
 Para gerar o instalador na sua máquina: instale o [Inno Setup 6](https://jrsoftware.org/isinfo.php), rode `cmake --install build --config RelWithDebInfo --prefix dist` e depois `iscc /DAppVersion=0.1.0 installer\niriun-obs.iss`. O resultado fica em `dist-installer\`.
 
