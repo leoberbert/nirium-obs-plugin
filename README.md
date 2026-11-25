@@ -1,107 +1,230 @@
-# Niriun OBS plugin
+<h1 align="center">🎥 Niriun para OBS Studio</h1>
 
-An OBS Studio source that receives the camera and microphone of a phone running [Niriun](https://github.com/leoberbert/Niriun),
-and tells the phone when the source is **on air** or in **preview** (tally).
+<p align="center">
+  <strong>O celular vira câmera do OBS, e o OBS avisa o celular quando ele está no ar.</strong><br>
+  Plugin para OBS Studio que recebe vídeo e áudio do app <a href="https://github.com/leoberbert/Niriun">Niriun</a> pela rede Wi-Fi ou por cabo USB, sem programa extra no computador.
+</p>
 
-It started from [droidcam-obs-plugin](https://github.com/dev47apps/droidcam-obs-plugin) (GPL-2.0-or-later) by Dev47Apps, version 2.5.1
-(commit `ddfa888`). This repository is independent, not a GitHub fork, and does not follow the upstream; its history still contains the original
-commits. The DroidCam protocol was replaced by Niriun's. The plugin is the PC side of the Niriun protocol, so **nothing else has to be installed
-on the computer**: no Iriun Webcam client, no virtual camera driver, no OBS WebSocket.
+<p align="center">
+  <a href="https://github.com/leoberbert/nirium-obs-plugin/releases/latest"><img src="https://img.shields.io/github/v/release/leoberbert/nirium-obs-plugin?style=for-the-badge&logo=github&color=blue" alt="Última versão"></a>
+  <a href="https://github.com/leoberbert/nirium-obs-plugin/actions/workflows/build.yml"><img src="https://img.shields.io/github/actions/workflow/status/leoberbert/nirium-obs-plugin/build.yml?style=for-the-badge&logo=githubactions&logoColor=white&label=CI" alt="CI"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/licen%C3%A7a-GPL--2.0--or--later-green?style=for-the-badge" alt="Licença GPL"></a>
+</p>
 
-```
-phone (Niriun app)  ──── Wi-Fi or USB ────►  OBS + niriun-obs plugin
-   camera + mic         H.264/HEVC + Opus      decodes, shows the source
-   tally border   ◄──── tally (ON AIR) ─────  knows if the source is on program
-```
+<p align="center">
+  <img src="https://img.shields.io/badge/Windows-10%2F11-0078D6?style=flat-square&logo=windows&logoColor=white" alt="Windows">
+  <img src="https://img.shields.io/badge/OBS%20Studio-32.x-302E31?style=flat-square&logo=obsstudio&logoColor=white" alt="OBS Studio">
+  <img src="https://img.shields.io/badge/C%2B%2B-17-00599C?style=flat-square&logo=cplusplus&logoColor=white" alt="C++17">
+  <img src="https://img.shields.io/github/stars/leoberbert/nirium-obs-plugin?style=flat-square&logo=github" alt="Stars">
+  <img src="https://img.shields.io/github/issues/leoberbert/nirium-obs-plugin?style=flat-square" alt="Issues">
+</p>
 
-Portuguese: [README.pt-BR.md](README.pt-BR.md).
+<p align="center">
+  <a href="#-instalação">📥 Instalação</a> •
+  <a href="#-primeiros-passos">🚀 Primeiros passos</a> •
+  <a href="#-como-o-tally-funciona">🔴 Tally</a> •
+  <a href="#-compilar">🔨 Compilar</a> •
+  <a href="#-problemas-comuns">🛠️ Problemas</a> •
+  <a href="README.en.md">🇺🇸 English</a>
+</p>
 
-## Use
+---
 
-1. Install the plugin (below) and restart OBS Studio.
-2. On the phone: open Niriun and press **Start**.
-3. In OBS: **Sources → + → Niriun**. Pick the phone in **Device** (it is found automatically on the same Wi-Fi; for a cable
-   choose the `[USB]` entry, or use *WiFi IP* and type the address shown in the app's Details) and press **Activate**.
-4. The phone's border turns **magenta** while the source is on the program output and **amber** when it is in the preview
-   (Studio Mode), and the app asks for a double confirmation before stopping while you are live.
+## 🎯 Em resumo
 
-Properties: resolution, frame rate, H.264/HEVC, audio on/off, color matrix, hardware decoding, low-latency (unbuffered)
-output, "disconnect when not showing", and remote camera controls (camera, zoom, torch, mirror, lock exposure/focus).
-Every change that affects the stream reconnects automatically; if the phone goes away the plugin keeps trying.
-
-### How the phone is found
-
-| Mechanism | What it needs |
+| | |
 |---|---|
-| UDP multicast beacon `239.255.188.58:4698` (the phone sends it every 2 s while no computer is connected) | OBS may listen on UDP; Windows asks for firewall permission the first time |
-| **Refresh** probes the local /24 on TCP 4697 (the phone answers with its hello) | outbound TCP only: works where multicast is blocked |
-| USB: `adb forward` | `adb` in PATH or in the Android SDK (`ANDROID_HOME`, `%LOCALAPPDATA%\Android\Sdk`); optional |
-| *WiFi IP* | the address of the phone, port 4699 |
+| 📱 **Celular como câmera** | H.264 ou HEVC até 4K, com áudio Opus do microfone |
+| 🔴 **Tally de verdade** | Borda **magenta** no celular quando a fonte está no ar e **âmbar** no preview |
+| 🔌 **Wi-Fi ou USB** | Descoberta automática na rede, `adb` para cabo, ou IP manual |
+| 🎛️ **Controles remotos** | Câmera, zoom, lanterna, espelho e travar foco, direto nas propriedades da fonte |
+| 🪶 **Nada a mais no PC** | Sem cliente do Iriun, sem driver de câmera virtual, sem OBS WebSocket |
+| 🆓 **Livre** | GPL-2.0-or-later |
 
-## Install (Windows, OBS Studio 32.x)
+```
+celular (app Niriun) ──── Wi-Fi ou USB ────►  OBS + plugin Niriun
+   câmera + microfone      H.264/HEVC + Opus     decodifica e mostra a fonte
+   borda do tally     ◄──── tally (NO AR) ─────  sabe se a fonte está no programa
+```
 
-Download `niriun-obs-windows-x64` from the CI artifacts (or build it, below) and either
+---
 
-* unzip it into the OBS Studio folder (`C:\Program Files\obs-studio`, administrator), or
-* run `scripts\install-windows.ps1` for the current user only (`%APPDATA%\obs-studio\plugins\niriun-obs`).
+## 📥 Instalação
 
-The plugin links against the FFmpeg that OBS ships; it refuses to load if the major version of `avcodec` differs from the
-one it was built with (build against the OBS release you run).
+Baixe o arquivo da [página de releases](https://github.com/leoberbert/nirium-obs-plugin/releases/latest). Feche o OBS Studio antes de instalar.
 
-## Build
+### 🧩 Opção 1: instalador (recomendado)
 
-Windows (Visual Studio 2022, CMake 3.20+, git):
+1. Baixe `niriun-obs-<versão>-windows-x64-setup.exe`.
+2. Execute (pede permissão de administrador). Ele acha sozinho a pasta do OBS (`C:\Program Files\obs-studio`) e avisa se não encontrar.
+3. Avance até o fim e abra o OBS.
+
+Para remover: **Configurações → Aplicativos → Niriun - plugin para OBS Studio → Desinstalar**.
+
+### 📦 Opção 2: pacote portátil
+
+1. Baixe `niriun-obs-<versão>-windows-x64-portable.zip` e descompacte.
+2. Copie as pastas `obs-plugins` e `data` para dentro da pasta do OBS, aceitando mesclar:
+
+   | Arquivo | Destino |
+   |---|---|
+   | `obs-plugins\64bit\niriun-obs.dll` | `C:\Program Files\obs-studio\obs-plugins\64bit\` |
+   | `data\obs-plugins\niriun-obs\locale\*.ini` | `C:\Program Files\obs-studio\data\obs-plugins\niriun-obs\locale\` |
+
+   Em um OBS **portátil**, use a pasta onde ele foi descompactado no lugar de `C:\Program Files\obs-studio`.
+
+### 👤 Opção 3: só para o seu usuário (sem administrador)
+
+Com o código-fonte baixado, no PowerShell:
 
 ```powershell
-scripts\fetch-windows-deps.ps1                       # headers + import libraries matching the installed OBS (-ObsDir to change)
-cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -DNIRIUN_DEPS_DIR="$PWD\deps"
-cmake --build build --config RelWithDebInfo
-ctest --test-dir build -C RelWithDebInfo             # protocol unit tests
-scripts\install-windows.ps1
+scripts\install-windows.ps1        # instala em %APPDATA%\obs-studio\plugins\niriun-obs
 ```
 
-Linux / macOS: `cmake -S . -B build` with `libobs`, `obs-frontend-api` and FFmpeg found through CMake config files or
-pkg-config, then `cmake --build build`. On Linux the sources pass a `g++ -fsyntax-only` check and the unit tests run; the plugin itself
-has only been run on Windows, and macOS has not been compiled at all.
+### ✅ Conferir se instalou
 
-## Test
+Abra o OBS, clique em **Fontes → +** e procure **Niriun** na lista. Se não aparecer, veja **Ajuda → Arquivos de log → Ver log atual** e procure por `niriun-obs`: a linha `module loaded` indica que o plugin carregou.
 
-* `ctest`: protocol framing, parsing and builders (no OBS needed).
-* `tools/phone-sim/phone-sim.js`: a stand-in for the phone (real H.264/HEVC and Opus from ffmpeg, beacon, probe port,
-  controls, rotation). `node tools/phone-sim/phone-sim.js` and add a source with *WiFi IP* `127.0.0.1`.
-* `tools/e2e/e2e.js`: starts a portable OBS with the plugin plus the simulator and checks discovery, video, audio, ACKs,
-  tally (program / off / preview / program), camera controls, rotation, settings changes, HEVC and reconnection through
-  obs-websocket. `tools/e2e/app-e2e.js` does the video/tally part against the real Android app over `adb`.
+### 📋 Requisitos
 
-## Protocol
+- 🪟 Windows 10 ou 11 (64 bits)
+- 🎬 OBS Studio **32.x**: o plugin usa o FFmpeg do próprio OBS e se recusa a carregar se a versão for incompatível. Em outra versão do OBS, [compile o plugin](#-compilar) contra ela.
+- 📱 Celular Android com o app [Niriun](https://github.com/leoberbert/Niriun) com suporte ao tally (a versão seguinte à 0.1.2; o vídeo e o áudio funcionam com a 0.1.1 e a 0.1.2, sem tally)
+- 🔌 *Opcional (USB):* `adb` no PATH ou o Android SDK instalado
 
-The wire protocol is documented in the Niriun repository (`docs/PROTOCOL.md`). What this plugin does:
+---
 
-| Direction | Message | When |
+## 🚀 Primeiros passos
+
+1. 📱 **No celular:** abra o Niriun e toque em **Iniciar**.
+2. 🎬 **No OBS:** **Fontes → + → Niriun** e dê um nome.
+3. 🔎 Em **Dispositivo**, escolha o celular:
+   - ele aparece sozinho se estiver na mesma rede Wi-Fi (`Nome [WiFi] (192.168.x.x)`);
+   - por cabo, escolha a entrada `[USB]` (ative a depuração USB no celular);
+   - se não aparecer, clique em **Atualizar lista**, ou escolha **Usar IP do WiFi** e digite o endereço mostrado em *Detalhes* no app.
+4. ▶️ Clique em **Ativar**. A imagem aparece em alguns segundos.
+5. 🔴 Coloque a fonte em uma cena e acompanhe a borda do celular mudar.
+
+### ⚙️ Propriedades da fonte
+
+| Opção | Para que serve |
+|---|---|
+| **Resolução / Taxa de quadros** | O que o celular codifica (de 640×360 a 3840×2160, 24/30/60 fps) |
+| **Formato de vídeo** | H.264 (padrão) ou HEVC |
+| **Matriz de cor** | Auto, Rec. 601 ou Rec. 709, se as cores parecerem erradas |
+| **Ativar áudio** | Recebe o microfone do celular |
+| **Enviar tally ao celular** | Liga ou desliga a borda NO AR / preview |
+| **Desconectar quando a fonte não estiver visível** | Economiza bateria do celular |
+| **Latência ultrabaixa** | Sem buffer no OBS (padrão); desligue para saída mais suave |
+| **Aceleração por hardware** | Decodifica na GPU quando possível |
+| **Controles da câmera** | Câmera, zoom, lanterna, espelho, travar exposição e foco |
+
+Qualquer mudança que afete o vídeo reconecta sozinha. Se o celular sumir, o plugin continua tentando.
+
+---
+
+## 🔴 Como o tally funciona
+
+O OBS já sabe em que estado cada fonte está, e o plugin repassa isso ao celular pela mesma conexão do vídeo:
+
+| No OBS | No celular |
+|---|---|
+| Fonte **no programa** (saída) | 🟣 Borda magenta e `AO VIVO · nome da fonte` |
+| Fonte **só no preview** (Modo Estúdio) | 🟠 Borda âmbar e `PREVIEW · nome da fonte` |
+| Fonte fora de uso | Sem borda |
+
+Com a fonte no ar, o app pede **dupla confirmação** antes de parar a transmissão.
+
+> ℹ️ Abrir o *Multiview* ou um projetor de uma cena também conta como "visível" e acende o preview.
+
+---
+
+## 🔍 Como o celular é encontrado
+
+| Mecanismo | O que precisa |
+|---|---|
+| 📡 Beacon UDP multicast (`239.255.188.58:4698`), enviado pelo celular a cada 2 s | Na primeira vez o Windows pede permissão no firewall para o OBS |
+| 🧭 **Atualizar lista** varre a rede /24 na porta TCP 4697 | Só conexões de saída: funciona onde o multicast é bloqueado |
+| 🔌 USB: `adb forward` | `adb` no PATH ou no Android SDK |
+| ✍️ IP manual | O endereço do celular, porta 4699 |
+
+---
+
+## 🔨 Compilar
+
+Windows com Visual Studio 2022, CMake 3.20+ e git:
+
+```powershell
+scripts\fetch-windows-deps.ps1                  # cabeçalhos e bibliotecas do OBS instalado (-ObsDir para outra pasta)
+cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -DNIRIUN_DEPS_DIR="$PWD\deps"
+cmake --build build --config RelWithDebInfo
+ctest --test-dir build -C RelWithDebInfo        # testes do protocolo
+scripts\install-windows.ps1                     # instala para o seu usuário
+```
+
+Linux e macOS: `cmake -S . -B build` com `libobs`, `obs-frontend-api` e FFmpeg disponíveis. No Linux o código passa na checagem de sintaxe do `g++` e nos testes unitários, mas o plugin só foi executado no Windows. O macOS não foi compilado.
+
+### 🤖 Gerar o instalador (GitHub Actions)
+
+O workflow [`release.yml`](.github/workflows/release.yml) compila o plugin e gera o instalador (`.exe`, Inno Setup) e o pacote portátil (`.zip`):
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0        # compila, gera os dois arquivos e publica a release
+```
+
+Também dá para rodar manualmente em **Actions → Release → Run workflow**: os arquivos ficam como artefatos da execução. O workflow [`build.yml`](.github/workflows/build.yml) compila e testa a cada push.
+
+Para gerar o instalador na sua máquina: instale o [Inno Setup 6](https://jrsoftware.org/isinfo.php), rode `cmake --install build --config RelWithDebInfo --prefix dist` e depois `iscc /DAppVersion=0.1.0 installer\niriun-obs.iss`. O resultado fica em `dist-installer\`.
+
+---
+
+## 🧪 Testes
+
+| O que | Como |
+|---|---|
+| Protocolo (sem OBS) | `ctest` |
+| Celular simulado | `node tools/phone-sim/phone-sim.js` e uma fonte com *IP do WiFi* `127.0.0.1` (precisa do `ffmpeg`) |
+| Ponta a ponta com OBS | `node tools/e2e/e2e.js --obs <pasta de um OBS portátil>`: descoberta, vídeo, áudio, tally, controles, rotação, HEVC e reconexão |
+| Com o app de verdade | `node tools/e2e/app-e2e.js --obs <pasta> --serial <serial do adb>` |
+
+---
+
+## 📡 Protocolo
+
+O protocolo está documentado no repositório do app (`docs/PROTOCOL.md`). O plugin é o lado do computador:
+
+| Sentido | Mensagem | Quando |
 |---|---|---|
-| phone → PC | `0x01` hello, `0x0A` sizes, `0x18` cameras | right after connecting |
-| PC → phone | `0x0B` START (audio, codec 1/2, width, height, fps) | after the sizes arrive |
-| phone → PC | `0x08` video (f32 seconds + Annex-B), `0x07` audio (raw Opus 48 kHz mono) | continuously |
-| PC → phone | `0x09` ACK of every video packet (the same f32, decode time in ms) | after each decode |
-| PC → phone | `0x10` camera controls | from the properties dialog |
-| PC → phone | **`0x30` tally** (u32 state 0 off / 1 preview / 2 program + 256-byte source name) | after START and on every change |
-| PC → phone | `0x01` no-op | every 3 s when idle (the phone drops silent clients after 10 s) |
+| celular → PC | `0x01` hello, `0x0A` tamanhos, `0x18` câmeras | ao conectar |
+| PC → celular | `0x0B` START (áudio, codec, resolução, fps) | depois dos tamanhos |
+| celular → PC | `0x08` vídeo, `0x07` áudio Opus | contínuo |
+| PC → celular | `0x09` ACK de cada pacote de vídeo | a cada decodificação |
+| PC → celular | `0x10` controles da câmera | pelas propriedades da fonte |
+| PC → celular | **`0x30` tally** (estado 0/1/2 e nome da fonte) | depois do START e a cada mudança |
+| PC → celular | `0x01` vazio | a cada 3 s parado (o celular derruba cliente mudo após 10 s) |
 
-`0x30` is a Niriun extension; an Iriun phone app ignores it. Tally is derived from OBS's own source state: *program* = the
-source is active (`activate`/`deactivate`), *preview* = it is visible but not active (`show`/`hide`, i.e. the preview in Studio
-Mode). Opening a Multiview or a projector of a scene also counts as visible.
+O `0x30` é uma extensão do Niriun; o app original do Iriun o ignora.
 
-## What changed from droidcam-obs-plugin
+---
 
-* New: the Niriun client (`niriun_protocol.h`, `source.cc`), Opus decoding, in-band tally, camera controls, beacon and subnet
-  discovery (`discovery.cc`), a CMake build (the original only shipped Makefiles), the simulator and the end-to-end tests.
-* Reworked: the FFmpeg wrapper (decoder flags are now set *before* `avcodec_open2`, so `LOW_DELAY` takes effect; picture
-  format and color are re-evaluated when the stream changes), the networking helpers (cancellable connects, no leaks),
-  `adb` handling (finds the Android SDK, quotes paths with spaces, uses `forward tcp:0`).
-* Removed: the DroidCam HTTP protocol, MJPEG, iOS/usbmuxd, the mDNS browser and the Qt "add device" dialog.
+## 🛠️ Problemas comuns
 
-## License
+| Sintoma | O que fazer |
+|---|---|
+| **Niriun** não aparece em *Fontes* | Confirme que o OBS é 64 bits, versão 32.x, e procure `niriun-obs` no log do OBS |
+| Log diz `libavcodec major version ... does not match` | O OBS usa outro FFmpeg: compile o plugin contra a sua versão do OBS |
+| O celular não aparece na lista | Mesma rede Wi-Fi? Clique em **Atualizar lista**; permita o OBS no firewall (redes privadas); ou use **IP do WiFi** |
+| Fica em "Procurando o celular..." | O app precisa estar em **Iniciar**; outro programa (ou outro OBS) pode estar conectado ao celular, que aceita um cliente por vez |
+| Entrada `[USB]` não aparece | Ative a depuração USB, aceite a chave no celular e confira `adb devices` |
+| Cores diferentes da câmera | Troque a **Matriz de cor** para Rec. 601 ou Rec. 709 |
+| HEVC reconecta sem parar | O codificador do celular recusou o HEVC: use H.264 |
+| O tally não acende no celular | Use uma versão do app com suporte ao tally (posterior à 0.1.2) e confira **Enviar tally ao celular** |
 
-GPL-2.0-or-later, as the original. See [LICENSE](LICENSE). Parts are © DEV47APPS (droidcam-obs-plugin) and © Hugh Bailey
-(OBS Studio's FFmpeg decode code); new code is © Leonardo Berbert. The Niriun app is a separate program (Apache-2.0) that
-talks to this plugin over the network.
+---
+
+## 🙏 Origem e licença
+
+O código partiu do [droidcam-obs-plugin](https://github.com/dev47apps/droidcam-obs-plugin) (GPL-2.0-or-later), da Dev47Apps, versão 2.5.1 (commit `ddfa888`). Este repositório é **independente**: não é um fork do GitHub e não acompanha o original, mas o histórico ainda contém os commits dele. O protocolo do DroidCam foi trocado pelo do Niriun, e foram removidos o MJPEG, o iOS, o navegador mDNS e a janela Qt.
+
+Licença **GPL-2.0-or-later**, como o original (veja [LICENSE](LICENSE)). Partes © DEV47APPS e © Hugh Bailey (decodificação FFmpeg do OBS Studio); código novo © Leonardo Berbert. O app Niriun é outro programa (Apache-2.0) que conversa com o plugin pela rede.

@@ -3,3 +3,4 @@ build-*/
 deps/
 e2e-out/
 dist/
+dist-installer/
