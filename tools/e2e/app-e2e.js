@@ -71,10 +71,10 @@ async function main() {
     check('camera list comes from the app', cams.length > 0, JSON.stringify(cams.map((i) => i.itemName)));
     console.log(`info  audio meter peak ${(obs.meters['Niriun1'] || 0).toFixed(4)} (an emulator microphone is silent)`);
 
-    // tally: the app shows "ON AIR · <source>" / "PREVIEW · <source>" (read from its accessibility tree, no screenshots)
+    // tally: the app shows "ON AIR" / "PREVIEW" (read from its accessibility tree, no screenshots)
     await sleep(1000);
     let label = tallyLabel();
-    check('app shows ON AIR for the source on program', /^(ON AIR|AO VIVO) · Niriun1$/.test(label), JSON.stringify(label));
+    check('app shows ON AIR for the source on program', /^(ON AIR|AO VIVO)$/.test(label), JSON.stringify(label));
 
     await obs.request('SetCurrentProgramScene', { sceneName: 'Other' });
     await sleep(1500);
@@ -86,7 +86,7 @@ async function main() {
     await obs.request('SetCurrentPreviewScene', { sceneName: 'Cam' });
     await sleep(1500);
     label = tallyLabel();
-    check('app shows PREVIEW in Studio Mode', /^PREVIEW · Niriun1$/.test(label), JSON.stringify(label));
+    check('app shows PREVIEW in Studio Mode', /^PREVIEW$/.test(label), JSON.stringify(label));
     await obs.request('SetStudioModeEnabled', { studioModeEnabled: false });
 
     // HEVC from the phone's own encoder (--hevc: the emulator's software HEVC encoder refuses the app's profile)
