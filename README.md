@@ -173,7 +173,7 @@ O workflow [`release.yml`](.github/workflows/release.yml) é **manual** e public
 
 O workflow confere a tag, roda o CI, compila e publica. Detalhes em [`docs/ci-cd.md`](docs/ci-cd.md). O [`ci.yml`](.github/workflows/ci.yml) compila e testa a cada push na `master` e em pull requests.
 
-Para gerar o instalador na sua máquina: instale o [Inno Setup 6](https://jrsoftware.org/isinfo.php), rode `cmake --install build --config RelWithDebInfo --prefix dist` e depois `iscc /DAppVersion=0.1.1 installer\niriun-obs.iss`. O resultado fica em `dist-installer\`.
+Para gerar o instalador na sua máquina: instale o [Inno Setup 6](https://jrsoftware.org/isinfo.php), rode `cmake --install build --config RelWithDebInfo --prefix dist` e depois `iscc /DAppVersion=0.1.2 installer\niriun-obs.iss`. O resultado fica em `dist-installer\`.
 
 ---
 

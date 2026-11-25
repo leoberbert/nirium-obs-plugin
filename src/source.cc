@@ -1004,15 +1004,101 @@ void apply_enabled(obs_properties_t *ppts, bool activated)
     }
 }
 
-bool refresh_clicked(obs_properties_t *, obs_property_t *, void *)
+std::string status_text(NiriunSource *s)
 {
+    Info info;
+    std::string err;
+    {
+        std::lock_guard<std::mutex> g(s->info_lock);
+        info = s->info;
+    }
+    {
+        std::lock_guard<std::mutex> g(s->cfg_lock);
+        err = s->last_error;
+    }
+
+    char buf[512];
+    if (!err.empty()) {
+        snprintf(buf, sizeof(buf), "%s", err.c_str());
+    } else if (!s->activated.load()) {
+        snprintf(buf, sizeof(buf), "%s", LOC("StatusIdle"));
+    } else if (!info.connected) {
+        snprintf(buf, sizeof(buf), "%s", LOC("StatusSearching"));
+    } else {
+        const char *tally = s->tally() == niriun::kTallyProgram ? LOC("TallyProgram")
+                            : s->tally() == niriun::kTallyPreview ? LOC("TallyPreview")
+                                                                  : LOC("TallyOff");
+        snprintf(buf, sizeof(buf), "%s: %s%s%s \xE2\x80\xA2 %s", LOC("StatusConnected"), info.phone.c_str(),
+                 info.stream.empty() ? "" : " \xE2\x80\xA2 ", info.stream.c_str(), tally);
+    }
+    return buf;
+}
+
+/** The device combo box, rebuilt in place. */
+void fill_devices(obs_property_t *list, NiriunSource *s, const std::string &selected)
+{
+    obs_property_list_clear(list);
+    bool have_selected = false;
+    std::vector<DeviceInfo> found = Discovery::instance().devices();
+    std::sort(found.begin(), found.end(), [](const DeviceInfo &a, const DeviceInfo &b) { return a.name < b.name; });
+    for (const DeviceInfo &d : found) {
+        std::string label = (d.name.empty() ? d.uuid.substr(0, 8) : d.name) + " [WiFi] (" + d.ip + ")";
+        std::string value = DEV_PREFIX_UUID + d.uuid;
+        obs_property_list_add_string(list, label.c_str(), value.c_str());
+        have_selected |= value == selected;
+    }
+    for (const AdbDevice &d : adb_cache()) {
+        std::string label = (d.model.empty() ? d.serial : d.model) + " [USB] (" + d.serial + ")";
+        std::string value = DEV_PREFIX_ADB + d.serial;
+        size_t idx = obs_property_list_add_string(list, label.c_str(), value.c_str());
+        if (!d.online())
+            obs_property_list_item_disable(list, idx, true);
+        have_selected |= value == selected;
+    }
+    if (s && !have_selected && selected.rfind(DEV_PREFIX_UUID, 0) == 0) {
+        // Chosen earlier but silent now (beacons stop while a computer is connected): keep it selectable.
+        obs_data_t *settings = obs_source_get_settings(s->source);
+        std::string name = obs_data_get_string(settings, OPT_ACTIVE_DEV_NAME);
+        std::string ip = obs_data_get_string(settings, OPT_ACTIVE_DEV_IP);
+        obs_data_release(settings);
+        std::string label = (name.empty() ? selected.substr(strlen(DEV_PREFIX_UUID), 8) : name) + " [WiFi] (" + ip + ")";
+        obs_property_list_add_string(list, label.c_str(), selected.c_str());
+    }
+    obs_property_list_add_string(list, LOC("UseWiFi"), DEV_MANUAL);
+}
+
+/**
+ * OBS re-renders the open dialog from the very properties object a button callback receives; it does not call
+ * get_properties again. So a callback that changes what the dialog shows has to change that object.
+ */
+void apply_activation_ui(obs_properties_t *ppts, NiriunSource *s, bool activated)
+{
+    apply_enabled(ppts, activated);
+    if (obs_property_t *b = obs_properties_get(ppts, "activate"))
+        obs_property_set_description(b, activated ? LOC("Deactivate") : LOC("Activate"));
+    if (obs_property_t *st = obs_properties_get(ppts, "status"))
+        obs_property_set_long_description(st, status_text(s).c_str());
+}
+
+bool refresh_clicked(obs_properties_t *ppts, obs_property_t *, void *data)
+{
+    NiriunSource *s = (NiriunSource *)data;
     ilog("refreshing the device list");
     Discovery::instance().probe_subnets();
     refresh_adb_cache();
-    return true;  // rebuilds the list
+
+    std::string selected;
+    if (s) {
+        obs_data_t *settings = obs_source_get_settings(s->source);
+        selected = obs_data_get_string(settings, OPT_DEVICE_LIST);
+        obs_data_release(settings);
+    }
+    if (obs_property_t *list = obs_properties_get(ppts, OPT_DEVICE_LIST))
+        fill_devices(list, s, selected);
+    return true;
 }
 
-bool activate_clicked(obs_properties_t *, obs_property_t *, void *data)
+bool activate_clicked(obs_properties_t *ppts, obs_property_t *, void *data)
 {
     NiriunSource *s = (NiriunSource *)data;
     if (!s)
@@ -1022,10 +1108,12 @@ bool activate_clicked(obs_properties_t *, obs_property_t *, void *data)
 
     if (obs_data_get_bool(settings, OPT_IS_ACTIVATED)) {
         obs_data_set_bool(settings, OPT_IS_ACTIVATED, false);
+        obs_data_release(settings);
         s->activated = false;
+        s->set_error("");
         s->wake.set();
         ilog("deactivated");
-        obs_data_release(settings);
+        apply_activation_ui(ppts, s, false);
         return true;
     }
 
@@ -1036,6 +1124,7 @@ bool activate_clicked(obs_properties_t *, obs_property_t *, void *data)
         elog("cannot activate: %s", err.c_str());
         s->set_error(err);
         obs_data_release(settings);
+        apply_activation_ui(ppts, s, false);
         return true;
     }
 
@@ -1054,6 +1143,7 @@ bool activate_clicked(obs_properties_t *, obs_property_t *, void *data)
     s->activated = true;
     s->wake.set();
     ilog("activated: type=%d id=%s ip=%s port=%d", (int)t.type, t.id.c_str(), t.ip.c_str(), t.port);
+    apply_activation_ui(ppts, s, true);
     return true;
 }
 
@@ -1111,36 +1201,6 @@ bool camera_changed(void *data, obs_properties_t *, obs_property_t *, obs_data_t
     return false;
 }
 
-std::string status_text(NiriunSource *s)
-{
-    Info info;
-    std::string err;
-    {
-        std::lock_guard<std::mutex> g(s->info_lock);
-        info = s->info;
-    }
-    {
-        std::lock_guard<std::mutex> g(s->cfg_lock);
-        err = s->last_error;
-    }
-
-    char buf[512];
-    if (!err.empty()) {
-        snprintf(buf, sizeof(buf), "%s", err.c_str());
-    } else if (!s->activated.load()) {
-        snprintf(buf, sizeof(buf), "%s", LOC("StatusIdle"));
-    } else if (!info.connected) {
-        snprintf(buf, sizeof(buf), "%s", LOC("StatusSearching"));
-    } else {
-        const char *tally = s->tally() == niriun::kTallyProgram ? LOC("TallyProgram")
-                            : s->tally() == niriun::kTallyPreview ? LOC("TallyPreview")
-                                                                  : LOC("TallyOff");
-        snprintf(buf, sizeof(buf), "%s: %s%s%s \xE2\x80\xA2 %s", LOC("StatusConnected"), info.phone.c_str(),
-                 info.stream.empty() ? "" : " \xE2\x80\xA2 ", info.stream.c_str(), tally);
-    }
-    return buf;
-}
-
 obs_properties_t *niriun_properties(void *data)
 {
     NiriunSource *s = (NiriunSource *)data;
@@ -1160,35 +1220,7 @@ obs_properties_t *niriun_properties(void *data)
 
     // ---- device ----
     p = obs_properties_add_list(ppts, OPT_DEVICE_LIST, LOC("Device"), OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_STRING);
-    bool have_selected = false;
-    {
-        std::vector<DeviceInfo> found = Discovery::instance().devices();
-        std::sort(found.begin(), found.end(), [](const DeviceInfo &a, const DeviceInfo &b) { return a.name < b.name; });
-        for (const DeviceInfo &d : found) {
-            std::string label = (d.name.empty() ? d.uuid.substr(0, 8) : d.name) + " [WiFi] (" + d.ip + ")";
-            std::string value = DEV_PREFIX_UUID + d.uuid;
-            obs_property_list_add_string(p, label.c_str(), value.c_str());
-            have_selected |= value == selected;
-        }
-        for (const AdbDevice &d : adb_cache()) {
-            std::string label = (d.model.empty() ? d.serial : d.model) + " [USB] (" + d.serial + ")";
-            std::string value = DEV_PREFIX_ADB + d.serial;
-            size_t idx = obs_property_list_add_string(p, label.c_str(), value.c_str());
-            if (!d.online())
-                obs_property_list_item_disable(p, idx, true);
-            have_selected |= value == selected;
-        }
-    }
-    if (s && !have_selected && selected.rfind(DEV_PREFIX_UUID, 0) == 0) {
-        // Chosen earlier but silent now (beacons stop while a computer is connected): keep it selectable.
-        obs_data_t *settings = obs_source_get_settings(s->source);
-        std::string name = obs_data_get_string(settings, OPT_ACTIVE_DEV_NAME);
-        std::string ip = obs_data_get_string(settings, OPT_ACTIVE_DEV_IP);
-        obs_data_release(settings);
-        std::string label = (name.empty() ? selected.substr(strlen(DEV_PREFIX_UUID), 8) : name) + " [WiFi] (" + ip + ")";
-        obs_property_list_add_string(p, label.c_str(), selected.c_str());
-    }
-    obs_property_list_add_string(p, LOC("UseWiFi"), DEV_MANUAL);
+    fill_devices(p, s, selected);
 
     obs_properties_add_button2(ppts, "refresh", LOC("Refresh"), refresh_clicked, s);
     obs_properties_add_text(ppts, OPT_WIFI_IP, LOC("WifiIP"), OBS_TEXT_DEFAULT);
