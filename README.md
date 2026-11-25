@@ -85,9 +85,80 @@ scripts\install-windows.ps1        # instala em %APPDATA%\obs-studio\plugins\nir
 
 Abra o OBS, clique em **Fontes → +** e procure **Niriun** na lista. Se não aparecer, veja **Ajuda → Arquivos de log → Ver log atual** e procure por `niriun-obs`: a linha `module loaded` indica que o plugin carregou.
 
+### 🐧 Linux
+
+> ⚠️ **Estado:** o workflow de Release publica só o pacote do Windows. No Linux o plugin precisa ser **compilado** por você, e ele ainda **não foi executado** no Linux (só passou na checagem de sintaxe do `g++` e nos testes do protocolo). Se tentar, relate o resultado nas issues.
+
+**1. Dependências para compilar** (cabeçalhos de desenvolvimento do OBS e do FFmpeg, versão compatível com o seu OBS 32.x):
+
+```bash
+# Debian/Ubuntu (OBS pelo PPA oficial ou pacote com libobs-dev)
+sudo apt install build-essential cmake pkg-config git libobs-dev obs-studio libavcodec-dev libavutil-dev
+# Fedora
+sudo dnf install gcc-c++ cmake pkgconf-pkg-config git obs-studio-devel ffmpeg-free-devel
+# Arch
+sudo pacman -S base-devel cmake git obs-studio ffmpeg
+```
+
+**2. Compilar**
+
+```bash
+git clone https://github.com/leoberbert/nirium-obs-plugin.git && cd nirium-obs-plugin
+cmake -S . -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo
+cmake --build build
+ctest --test-dir build                 # testes do protocolo (opcional)
+```
+
+**3. Instalar** (feche o OBS antes). Escolha uma das formas:
+
+- **OBS do sistema (apt, dnf, pacman), todos os usuários:**
+
+  ```bash
+  sudo cmake --install build --prefix /usr
+  ```
+
+  Isso coloca `niriun-obs.so` em `/usr/lib/obs-plugins/` (em algumas distros a pasta é `/usr/lib64/obs-plugins/` ou `/usr/lib/x86_64-linux-gnu/obs-plugins/`; se for o seu caso, copie o `.so` para lá) e os idiomas em `/usr/share/obs/obs-plugins/niriun-obs/locale/`.
+
+- **Só para o seu usuário (sem sudo)**, funciona com o OBS do sistema, AppImage ou OBS compilado:
+
+  ```bash
+  P=~/.config/obs-studio/plugins/niriun-obs
+  mkdir -p "$P/bin/64bit" "$P/data/locale"
+  cp build/niriun-obs.so "$P/bin/64bit/"
+  cp data/locale/*.ini "$P/data/locale/"
+  ```
+
+- **OBS portátil** (pasta descompactada, tarball ou AppImage extraído com `--appimage-extract`): copie para dentro da pasta do OBS, mantendo a mesma estrutura do plugin do usuário:
+
+  ```bash
+  P=/caminho/do/obs/plugins/niriun-obs      # ou o diretório de plugins do seu build do OBS
+  mkdir -p "$P/bin/64bit" "$P/data/locale"
+  cp build/niriun-obs.so "$P/bin/64bit/"
+  cp data/locale/*.ini "$P/data/locale/"
+  ```
+
+  Se o seu OBS compilado usa `--prefix`, use `cmake --install build --prefix <esse prefixo>`.
+
+- **Flatpak (`com.obsproject.Studio`):** o OBS roda isolado e usa o FFmpeg do runtime Flatpak, então o `.so` compilado contra o FFmpeg do sistema **provavelmente não carrega**. O plugin deve ser compilado contra o mesmo `libobs` e FFmpeg do Flatpak (SDK `org.freedesktop.Sdk` com a extensão do OBS). Com o `.so` compatível em mãos, instale por usuário:
+
+  ```bash
+  P=~/.var/app/com.obsproject.Studio/config/obs-studio/plugins/niriun-obs
+  mkdir -p "$P/bin/64bit" "$P/data/locale"
+  cp niriun-obs.so "$P/bin/64bit/"
+  cp data/locale/*.ini "$P/data/locale/"
+  ```
+
+  Limitações dentro do sandbox: o Wi-Fi funciona, mas o **`adb` (USB) não está disponível** no Flatpak por padrão; use Wi-Fi ou IP manual. [INFERÊNCIA, não testado] Como alternativa, rode `adb forward tcp:4699 tcp:4699` no sistema e escolha no OBS "Usar IP do WiFi" com `127.0.0.1`.
+
+**4. Rede:** o OBS precisa receber o beacon UDP **4698** (multicast) e abrir TCP **4699** até o celular (a descoberta por varredura usa a TCP **4697**). Com firewall ativo (`ufw`, `firewalld`) libere a UDP 4698 de entrada; se o celular não aparecer sozinho, use o IP manual.
+
+Depois de instalar, confira como em [Conferir se instalou](#-conferir-se-instalou). No Linux o log fica em `~/.config/obs-studio/logs/` (Flatpak: `~/.var/app/com.obsproject.Studio/config/obs-studio/logs/`).
+
+Para remover: apague os arquivos que você copiou (`niriun-obs.so` e a pasta `niriun-obs` de dados) ou a pasta `~/.config/obs-studio/plugins/niriun-obs`.
+
 ### 📋 Requisitos
 
-- 🪟 Windows 10 ou 11 (64 bits)
+- 🪟 Windows 10 ou 11 (64 bits), ou 🐧 Linux 64 bits (compilado por você, veja [Linux](#-linux))
 - 🎬 OBS Studio **32.x**: o plugin usa o FFmpeg do próprio OBS e se recusa a carregar se a versão for incompatível. Em outra versão do OBS, [compile o plugin](#-compilar) contra ela.
 - 📱 Celular Android com o app [Niriun](https://github.com/leoberbert/Niriun) com suporte ao tally (a versão seguinte à 0.1.2; o vídeo e o áudio funcionam com a 0.1.1 e a 0.1.2, sem tally)
 - 🔌 *Opcional (USB):* `adb` no PATH ou o Android SDK instalado
