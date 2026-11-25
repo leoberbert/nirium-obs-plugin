@@ -86,8 +86,9 @@ The wire protocol is documented in the Niriun repository (`docs/PROTOCOL.md`). W
 | PC → phone | `0x10` camera controls | from the properties dialog |
 | PC → phone | **`0x30` tally** (u32 state 0 off / 1 preview / 2 program + 256-byte source name) | after START and on every change |
 | PC → phone | `0x01` no-op | every 3 s when idle (the phone drops silent clients after 10 s) |
+| phone → PC | **`0x31` stop screen** (mode 1 black, 2 offline card) | once, when the user taps Stop |
 
-`0x30` is a Niriun extension; an Iriun phone app ignores it. Tally is derived from OBS's own source state: *program* = the
+`0x30` and `0x31` are Niriun extensions; an Iriun phone app ignores them. With `0x31` the phone tells the plugin what to leave on the source after a deliberate Stop (a black frame or an offline card); a dropped connection still clears the picture. Tally is derived from OBS's own source state: *program* = the
 source is active (`activate`/`deactivate`), *preview* = it is visible but not active (`show`/`hide`, i.e. the preview in Studio
 Mode). Opening a Multiview or a projector of a scene also counts as visible.
 

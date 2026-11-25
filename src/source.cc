@@ -23,6 +23,8 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include <stdlib.h>
 #include <string.h>
 
+#include <math.h>
+
 #include <algorithm>
 #include <atomic>
 #include <condition_variable>
@@ -155,6 +157,7 @@ struct Session {
     obs_source_frame2 vframe;
     obs_source_audio aframe;
     int shown_w = 0, shown_h = 0;
+    niriun::StopScreen stop_mode = niriun::kStopClear;  // set by the phone just before a deliberate Stop
 
     // network-thread state
     bool got_hello = false;
@@ -253,6 +256,9 @@ struct NiriunSource {
     void run();
     socket_t connect_target(Target &t);
     void run_session(socket_t sock, const StartParams &sp);
+    void show_stop_frame(niriun::StopScreen mode, int w, int h);
+    std::vector<uint8_t> stop_buf;
+    bool stop_card_shown = false;  // network thread only
     bool handle_packet(Session &s, niriun::Framer &framer, const std::string &peer);
     void flush_outgoing(Session &s);
     void publish(const std::function<void(Info &)> &fn)
@@ -608,10 +614,82 @@ bool NiriunSource::handle_packet(Session &s, niriun::Framer &framer, const std::
         break;
     }
 
+    case niriun::kMsgStopScreen: {
+        niriun::StopScreen mode;
+        if (niriun::parse_stop_screen(data, len, &mode))
+            s.stop_mode = mode;
+        break;
+    }
+
     default:
         break;  // CAMERA_USAGE, control echoes and unknown types are ignored
     }
     return true;
+}
+
+namespace {
+
+/** The "offline" card: a ring with a slash through it, centered. */
+bool offline_card_pixel(int x, int y, int w, int h)
+{
+    const float unit = (float)(w < h ? w : h);
+    const float radius = unit * 0.14f, half = unit * 0.012f;
+    const float dx = (float)x - w * 0.5f, dy = (float)y - h * 0.5f;
+    const float d = sqrtf(dx * dx + dy * dy);
+    if (fabsf(d - radius) <= half)
+        return true;
+    return d < radius && fabsf(dx - dy) * 0.70710678f <= half;
+}
+
+}  // namespace
+
+void NiriunSource::show_stop_frame(niriun::StopScreen mode, int w, int h)
+{
+    if (w < 2 || h < 2) {
+        w = 1280;
+        h = 720;
+    }
+    w &= ~1;
+    h &= ~1;
+    const int cw = w / 2, ch = h / 2;
+    const bool card = mode == niriun::kStopOffline;
+    stop_buf.assign((size_t)w * h + 2 * (size_t)cw * ch, 0);
+    uint8_t *y = stop_buf.data();
+    uint8_t *u = y + (size_t)w * h;
+    uint8_t *v = u + (size_t)cw * ch;
+    // Limited-range BT.709: black is 16/128/128; the card is dark purple with a light purple ring.
+    memset(y, card ? 24 : 16, (size_t)w * h);
+    memset(u, card ? 137 : 128, (size_t)cw * ch);
+    memset(v, card ? 133 : 128, (size_t)cw * ch);
+    if (card) {
+        for (int row = 0; row < h; row++)
+            for (int col = 0; col < w; col++)
+                if (offline_card_pixel(col, row, w, h))
+                    y[(size_t)row * w + col] = 153;
+        for (int row = 0; row < ch; row++)
+            for (int col = 0; col < cw; col++)
+                if (offline_card_pixel(col * 2, row * 2, w, h)) {
+                    u[(size_t)row * cw + col] = 173;
+                    v[(size_t)row * cw + col] = 149;
+                }
+    }
+
+    obs_source_frame2 f = {};
+    f.width = (uint32_t)w;
+    f.height = (uint32_t)h;
+    f.format = VIDEO_FORMAT_I420;
+    f.range = VIDEO_RANGE_PARTIAL;
+    f.timestamp = os_gettime_ns();
+    video_format_get_parameters_for_format(VIDEO_CS_709, VIDEO_RANGE_PARTIAL, VIDEO_FORMAT_I420, f.color_matrix,
+                                           f.color_range_min, f.color_range_max);
+    f.data[0] = y;
+    f.data[1] = u;
+    f.data[2] = v;
+    f.linesize[0] = (uint32_t)w;
+    f.linesize[1] = f.linesize[2] = (uint32_t)cw;
+    obs_source_output_video2(source, &f);
+    stop_card_shown = true;
+    ilog("showing the %s screen after Stop", card ? "offline" : "black");
 }
 
 void NiriunSource::run_session(socket_t sock, const StartParams &sp)
@@ -669,7 +747,15 @@ void NiriunSource::run_session(socket_t sock, const StartParams &sp)
     s.stop();
     net_close(sock);
 
-    obs_source_output_video2(source, NULL);
+    // A deliberate Stop on the phone says what to leave on screen; a dropped connection clears the picture. A
+    // connection that closes before the phone even said hello (adb forward with the app stopped) must not wipe
+    // the card that is already showing.
+    if (s.stop_mode != niriun::kStopClear && !stopping.load() && should_connect()) {
+        show_stop_frame(s.stop_mode, s.shown_w, s.shown_h);
+    } else if (s.got_hello || !stop_card_shown) {
+        obs_source_output_video2(source, NULL);
+        stop_card_shown = false;
+    }
     obs_source_output_audio(source, NULL);
     publish([](Info &i) {
         Info keep;
@@ -691,6 +777,10 @@ void NiriunSource::run()
             if (adb_port) {
                 Adb::instance().remove_forward(adb_port);
                 adb_port = 0;
+            }
+            if (stop_card_shown) {
+                obs_source_output_video2(source, NULL);
+                stop_card_shown = false;
             }
             wake.wait_ms(250);
             continue;

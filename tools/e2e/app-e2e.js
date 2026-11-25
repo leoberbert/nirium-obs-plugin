@@ -11,7 +11,7 @@
 const { execFileSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
-const { Obs, launchObs, makeChecker, parseArgs, sleep } = require('./lib');
+const { Obs, launchObs, makeChecker, parseArgs, sleep, waitFor } = require('./lib');
 
 const args = parseArgs(process.argv.slice(2));
 if (typeof args.obs !== 'string') {
@@ -31,6 +31,54 @@ function phoneTexts() {
   const xml = execFileSync('adb', ['-s', SERIAL, 'shell', 'cat', file], { maxBuffer: 16 << 20 }).toString('utf8');
   execFileSync('adb', ['-s', SERIAL, 'shell', 'rm', file], { stdio: 'ignore' });
   return [...xml.matchAll(/text="([^"]*)"/g)].map((m) => m[1]).filter(Boolean);
+}
+
+/** Taps the center of the first (or last) visible node whose text matches [re]. */
+function tapText(re, last) {
+  const file = '/sdcard/niriun-ui.xml';
+  execFileSync('adb', ['-s', SERIAL, 'shell', 'uiautomator', 'dump', file], { stdio: 'ignore' });
+  const xml = execFileSync('adb', ['-s', SERIAL, 'shell', 'cat', file], { maxBuffer: 16 << 20 }).toString('utf8');
+  execFileSync('adb', ['-s', SERIAL, 'shell', 'rm', file], { stdio: 'ignore' });
+  const nodes = [...xml.matchAll(/text="([^"]*)"[^>]*bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"/g)].filter((m) => re.test(m[1]));
+  const n = last ? nodes[nodes.length - 1] : nodes[0];
+  if (!n) throw new Error(`no node matching ${re}; visible: ${JSON.stringify([...xml.matchAll(/text="([^"]+)"/g)].map((m) => m[1]))}`);
+  const [x1, y1, x2, y2] = n.slice(2, 6).map(Number);
+  execFileSync('adb', ['-s', SERIAL, 'shell', 'input', 'tap', String(Math.round((x1 + x2) / 2)), String(Math.round((y1 + y2) / 2))]);
+}
+
+/** Minimal PNG reader (8-bit RGB/RGBA, not interlaced), enough to sample pixels of an OBS screenshot. */
+function readPng(file) {
+  const zlib = require('zlib');
+  const buf = fs.readFileSync(file);
+  let off = 8, w = 0, h = 0, bpp = 0;
+  const idat = [];
+  while (off < buf.length) {
+    const len = buf.readUInt32BE(off);
+    const type = buf.toString('latin1', off + 4, off + 8);
+    const data = buf.subarray(off + 8, off + 8 + len);
+    if (type === 'IHDR') {
+      w = data.readUInt32BE(0);
+      h = data.readUInt32BE(4);
+      bpp = data[9] === 6 ? 4 : 3;
+    } else if (type === 'IDAT') idat.push(data);
+    off += 12 + len;
+  }
+  const raw = zlib.inflateSync(Buffer.concat(idat));
+  const stride = w * bpp;
+  const px = Buffer.alloc(stride * h);
+  for (let y = 0; y < h; y++) {
+    const f = raw[y * (stride + 1)];
+    for (let i = 0; i < stride; i++) {
+      const x = raw[y * (stride + 1) + 1 + i];
+      const a = i >= bpp ? px[y * stride + i - bpp] : 0;
+      const b = y > 0 ? px[(y - 1) * stride + i] : 0;
+      const c = i >= bpp && y > 0 ? px[(y - 1) * stride + i - bpp] : 0;
+      const p = a + b - c, pa = Math.abs(p - a), pb = Math.abs(p - b), pc = Math.abs(p - c);
+      const paeth = pa <= pb && pa <= pc ? a : pb <= pc ? b : c;
+      px[y * stride + i] = (x + (f === 1 ? a : f === 2 ? b : f === 3 ? (a + b) >> 1 : f === 4 ? paeth : 0)) & 255;
+    }
+  }
+  return { w, h, pixel: (x, y) => [px[y * stride + x * bpp], px[y * stride + x * bpp + 1], px[y * stride + x * bpp + 2]] };
 }
 
 const tallyLabel = () => phoneTexts().find((t) => /^(ON AIR|AO VIVO|PREVIEW)\b/.test(t)) || '';
@@ -96,6 +144,35 @@ async function main() {
       await sleep(9000);
       const sizeHevc = await obs.screenshot('Niriun1', path.join(OUT, 'app-video-hevc.png'));
       check('HEVC from the app is decoded', sizeHevc > 3000, `png base64 ${sizeHevc} bytes`);
+    }
+
+    // Stop on the phone: the app sends 0x31 first, and the source keeps a black frame or the offline card
+    // (--stop black|offline says which one the app is set to; the app's default is the offline card).
+    const expectCard = args.stop !== 'black';
+    await obs.request('SetCurrentProgramScene', { sceneName: 'Other' }); // not on air: Stop needs no second confirmation
+    await sleep(1500);
+    // The controls hide 5 s after the last tap and an emulator needs seconds to dump the UI, so tap by position
+    // (Pixel 9, 1080x2424): the picture first, then the Stop button at the bottom right.
+    const tap = (x, y) => execFileSync('adb', ['-s', SERIAL, 'shell', 'input', 'tap', String(x), String(y)]);
+    tap(540, 1200);
+    await sleep(700);
+    tap(914, 2251);
+    check('Stop asks for confirmation', !!(await waitFor(async () => phoneTexts().some((t) => /^(Stop broadcasting\?|Parar a transmissão\?)$/.test(t)), 20000, 500)));
+    check('Stop confirmed in the dialog', !!(await waitFor(async () => { try { tapText(/^(Stop|Parar)$/, true); return true; } catch { return false; } }, 20000, 1000))); // the dialog's button
+    await obs.request('SetCurrentProgramScene', { sceneName: 'Cam' }); // an async source only shows frames while it is on screen
+    await sleep(3000);
+    const stopShot = path.join(OUT, 'app-stopped.png');
+    await obs.screenshot('Niriun1', stopShot, 320, 180);
+    const png = readPng(stopShot);
+    const corner = png.pixel(5, 5);
+    // the card is a ring around the center, so the brightest pixel of the middle row is on it (the screenshot is stretched to 16:9)
+    let ring = [0, 0, 0];
+    for (let x = 0; x < png.w; x++) { const p = png.pixel(x, Math.floor(png.h / 2)); if (p[0] + p[1] + p[2] > ring[0] + ring[1] + ring[2]) ring = p; }
+    const dark = (p) => p[0] + p[1] + p[2] < 30; // black is 0; the card's purple is about 50
+    if (expectCard) {
+      check('offline card: purple background and light ring', corner[2] > corner[0] && !dark(corner) && ring[0] + ring[1] + ring[2] > 300, `corner ${corner} ring ${ring}`);
+    } else {
+      check('black screen after Stop', dark(corner) && dark(ring), `corner ${corner} ring ${ring}`);
     }
   } catch (e) {
     check('test run completed without exception', false, e.message);

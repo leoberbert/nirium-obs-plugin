@@ -46,6 +46,14 @@ enum MsgType : uint8_t {
     kMsgCameraUsage = 0x1A,
     /** Niriun extension (PC -> phone): tally state of the OBS source. Not part of the Iriun protocol. */
     kMsgTally = 0x30,
+    /** Niriun extension (phone -> PC): sent before a deliberate stop; what the source should show afterwards. */
+    kMsgStopScreen = 0x31,
+};
+
+enum StopScreen : uint32_t {
+    kStopClear = 0,    // transparent: the source simply has no picture
+    kStopBlack = 1,
+    kStopOffline = 2,  // a card that says the camera is offline
 };
 
 enum Codec : uint32_t {
@@ -207,6 +215,16 @@ inline bool parse_video(const uint8_t *pkt, size_t len, VideoView *out)
     out->seconds = rdf32(pkt + 4);
     out->payload = pkt + 8;
     out->size = len - 8;
+    return true;
+}
+
+/** 0x31 from the phone: u32 mode at offset 4. Unknown modes are treated as "clear". */
+inline bool parse_stop_screen(const uint8_t *pkt, size_t len, StopScreen *mode)
+{
+    if (len < 8 || pkt[3] != kMsgStopScreen)
+        return false;
+    uint32_t m = rd32(pkt + 4);
+    *mode = m == kStopBlack ? kStopBlack : m == kStopOffline ? kStopOffline : kStopClear;
     return true;
 }
 

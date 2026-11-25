@@ -201,8 +201,9 @@ O protocolo está documentado no repositório do app (`docs/PROTOCOL.md`). O plu
 | PC → celular | `0x10` controles da câmera | pelas propriedades da fonte |
 | PC → celular | **`0x30` tally** (estado 0/1/2 e nome da fonte) | depois do START e a cada mudança |
 | PC → celular | `0x01` vazio | a cada 3 s parado (o celular derruba cliente mudo após 10 s) |
+| celular → PC | **`0x31` tela ao parar** (modo 1 preto, 2 cartão offline) | uma vez, ao tocar em Parar |
 
-O `0x30` é uma extensão do Niriun; o app original do Iriun o ignora.
+O `0x30` e o `0x31` são extensões do Niriun; o app original do Iriun as ignora. Com o `0x31` o app diz ao plugin o que deixar na fonte depois de um Parar deliberado (quadro preto ou um cartão offline); se a conexão cair, a fonte fica sem imagem como antes.
 
 ---
 

@@ -154,6 +154,7 @@ class Obs {
 
   /** Removes every input and the given scenes (the scene collection survives between runs). */
   async reset(sceneNames) {
+    await this.request('SetStudioModeEnabled', { studioModeEnabled: false });
     for (const { inputName } of (await this.request('GetInputList')).inputs) await this.request('RemoveInput', { inputName });
     for (const { sceneName } of (await this.request('GetSceneList')).scenes) {
       if (sceneNames.includes(sceneName)) await this.request('RemoveScene', { sceneName });

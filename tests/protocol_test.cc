@@ -241,12 +241,27 @@ static void test_framer()
     CHECK(error);
 }
 
+static void test_stop_screen()
+{
+    std::vector<uint8_t> body(4);
+    wr32(body.data(), 2);
+    auto p = make_packet(kMsgStopScreen, body);
+    StopScreen m = kStopClear;
+    CHECK(parse_stop_screen(p.data(), p.size(), &m) && m == kStopOffline);
+    wr32(p.data() + 4, 1);
+    CHECK(parse_stop_screen(p.data(), p.size(), &m) && m == kStopBlack);
+    wr32(p.data() + 4, 99);
+    CHECK(parse_stop_screen(p.data(), p.size(), &m) && m == kStopClear);
+    CHECK(!parse_stop_screen(p.data(), 7, &m));
+}
+
 int main()
 {
     test_header();
     test_hello();
     test_sizes_and_cameras();
     test_media_packets();
+    test_stop_screen();
     test_builders();
     test_framer();
     if (failures) {
