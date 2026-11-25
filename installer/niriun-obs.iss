@@ -1,7 +1,7 @@
-; Inno Setup script. Build with: iscc /DAppVersion=0.1.2 installer\niriun-obs.iss
+; Inno Setup script. Build with: iscc /DAppVersion=0.1.3 installer\niriun-obs.iss
 ; Expects `cmake --install build --prefix dist` to have been run (dist\obs-plugins, dist\data).
 #ifndef AppVersion
-  #define AppVersion "0.1.2"
+  #define AppVersion "0.1.3"
 #endif
 
 [Setup]
