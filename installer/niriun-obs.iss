@@ -29,10 +29,25 @@ Name: "brazilianportuguese"; MessagesFile: "compiler:Languages\BrazilianPortugue
 Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Files]
-Source: "..\dist\obs-plugins\64bit\niriun-obs.dll"; DestDir: "{app}\obs-plugins\64bit"; Flags: ignoreversion
-Source: "..\dist\data\obs-plugins\niriun-obs\locale\*"; DestDir: "{app}\data\obs-plugins\niriun-obs\locale"; Flags: ignoreversion recursesubdirs
+; OBS 32 and older: obs-plugins\64bit + data\obs-plugins\<name>. OBS 33+ (has a "core" folder): plugins\<name>\<name>.dll
+; + plugins\<name>\data. OBS 33 still loads the old layout, but only as "legacy"; the new one is used when available.
+Source: "..\dist\obs-plugins\64bit\niriun-obs.dll"; DestDir: "{app}\obs-plugins\64bit"; Flags: ignoreversion; Check: not NewLayout
+Source: "..\dist\data\obs-plugins\niriun-obs\locale\*"; DestDir: "{app}\data\obs-plugins\niriun-obs\locale"; Flags: ignoreversion recursesubdirs; Check: not NewLayout
+Source: "..\dist\obs-plugins\64bit\niriun-obs.dll"; DestDir: "{app}\plugins\niriun-obs"; Flags: ignoreversion; Check: NewLayout
+Source: "..\dist\data\obs-plugins\niriun-obs\locale\*"; DestDir: "{app}\plugins\niriun-obs\data\locale"; Flags: ignoreversion recursesubdirs; Check: NewLayout
+
+[InstallDelete]
+; Upgrading OBS 32 -> 33 would leave the old copy behind and the plugin would load twice.
+Type: files; Name: "{app}\obs-plugins\64bit\niriun-obs.dll"; Check: NewLayout
+Type: filesandordirs; Name: "{app}\data\obs-plugins\niriun-obs"; Check: NewLayout
+Type: filesandordirs; Name: "{app}\plugins\niriun-obs"; Check: not NewLayout
 
 [Code]
+function NewLayout: Boolean;
+begin
+  Result := DirExists(AddBackslash(WizardDirValue) + 'core');
+end;
+
 // The folder OBS Studio was installed to, from its own installer's registry key; the usual place otherwise.
 function ObsDir(Param: string): string;
 begin

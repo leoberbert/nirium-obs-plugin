@@ -4,7 +4,8 @@
 
 .PARAMETER Scope
   User     (default) %APPDATA%\obs-studio\plugins\niriun-obs; no administrator rights needed.
-  Machine  <ObsDir>\obs-plugins\64bit; run from an elevated PowerShell.
+  Machine  <ObsDir>, run from an elevated PowerShell (not needed for a portable OBS you can write to). The layout follows the
+           OBS version: OBS 33+ (has a "core" folder) gets plugins\niriun-obs\; older gets obs-plugins\64bit + data\obs-plugins.
 
 .PARAMETER Dll
   The built plugin. Default: build\RelWithDebInfo\niriun-obs.dll next to this repository's root.
@@ -28,8 +29,20 @@ if ($Scope -eq "User") {
     $binDir = Join-Path $root "bin\64bit"
     $dataDir = Join-Path $root "data\locale"
 } else {
-    $binDir = Join-Path $ObsDir "obs-plugins\64bit"
-    $dataDir = Join-Path $ObsDir "data\obs-plugins\niriun-obs\locale"
+    $oldBin = Join-Path $ObsDir "obs-plugins\64bit"
+    $oldData = Join-Path $ObsDir "data\obs-plugins\niriun-obs"
+    $newRoot = Join-Path $ObsDir "plugins\niriun-obs"
+    if (Test-Path (Join-Path $ObsDir "core")) {
+        $binDir = $newRoot
+        $dataDir = Join-Path $newRoot "data\locale"
+        # An OBS 32 copy left behind would make the plugin load twice.
+        Remove-Item (Join-Path $oldBin "niriun-obs.dll") -Force -ErrorAction SilentlyContinue
+        Remove-Item $oldData -Recurse -Force -ErrorAction SilentlyContinue
+    } else {
+        $binDir = $oldBin
+        $dataDir = Join-Path $oldData "locale"
+        Remove-Item $newRoot -Recurse -Force -ErrorAction SilentlyContinue
+    }
 }
 
 New-Item -ItemType Directory -Force -Path $binDir, $dataDir | Out-Null

@@ -98,6 +98,10 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $v = $env:VERSION.TrimStart('v')
           New-Item -ItemType Directory -Force dist-installer | Out-Null
+          # OBS 33+ layout: plugins\<name>\<name>.dll and plugins\<name>\data\locale (obs-plugins\ and data\ are the OBS 32 layout)
+          New-Item -ItemType Directory -Force dist\plugins\niriun-obs\data | Out-Null
+          Copy-Item dist\obs-plugins\64bit\niriun-obs.dll dist\plugins\niriun-obs\
+          Copy-Item dist\data\obs-plugins\niriun-obs\locale dist\plugins\niriun-obs\data\locale -Recurse
           Copy-Item LICENSE, README.md dist\
           Compress-Archive -Path dist\* -DestinationPath "dist-installer\niriun-obs-$v-windows-x64-portable.zip"
 

@@ -64,7 +64,7 @@ Para remover: **Configurações → Aplicativos → Niriun - plugin para OBS Stu
 ### 📦 Opção 2: pacote portátil
 
 1. Baixe `niriun-obs-<versão>-windows-x64-portable.zip` e descompacte.
-2. Copie as pastas `obs-plugins` e `data` para dentro da pasta do OBS, aceitando mesclar:
+2. **OBS 32:** copie as pastas `obs-plugins` e `data` para dentro da pasta do OBS, aceitando mesclar:
 
    | Arquivo | Destino |
    |---|---|
@@ -72,6 +72,15 @@ Para remover: **Configurações → Aplicativos → Niriun - plugin para OBS Stu
    | `data\obs-plugins\niriun-obs\locale\*.ini` | `C:\Program Files\obs-studio\data\obs-plugins\niriun-obs\locale\` |
 
    Em um OBS **portátil**, use a pasta onde ele foi descompactado no lugar de `C:\Program Files\obs-studio`.
+
+   **OBS 33 ou mais novo** (a pasta do OBS tem `core\` em vez de `obs-plugins\`): copie a pasta `plugins` do zip para a pasta do OBS:
+
+   | Arquivo | Destino |
+   |---|---|
+   | `plugins\niriun-obs\niriun-obs.dll` | `<pasta do OBS>\plugins\niriun-obs\` |
+   | `plugins\niriun-obs\data\locale\*.ini` | `<pasta do OBS>\plugins\niriun-obs\data\locale\` |
+
+   O instalador (.exe) escolhe sozinho o formato conforme a versão do OBS encontrada.
 
 ### 👤 Opção 3: só para o seu usuário (sem administrador)
 
@@ -159,7 +168,7 @@ Para remover: apague os arquivos que você copiou (`niriun-obs.so` e a pasta `ni
 ### 📋 Requisitos
 
 - 🪟 Windows 10 ou 11 (64 bits), ou 🐧 Linux 64 bits (compilado por você, veja [Linux](#-linux))
-- 🎬 OBS Studio **32.x**: o plugin usa o FFmpeg do próprio OBS e se recusa a carregar se a versão for incompatível. Em outra versão do OBS, [compile o plugin](#-compilar) contra ela.
+- 🎬 OBS Studio **32.x ou 33.x** (testado: 32.2.2 e 33.0.3): o plugin usa o FFmpeg do próprio OBS e se recusa a carregar se a versão for incompatível (precisa do mesmo `libavcodec`, hoje `avcodec-62`). Em outra versão do OBS, [compile o plugin](#-compilar) contra ela.
 - 📱 Celular Android com o app [Niriun](https://github.com/leoberbert/Niriun) com suporte ao tally (a versão seguinte à 0.1.2; o vídeo e o áudio funcionam com a 0.1.1 e a 0.1.2, sem tally)
 - 🔌 *Opcional (USB):* `adb` no PATH ou o Android SDK instalado
 
