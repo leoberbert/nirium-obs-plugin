@@ -1,6 +1,7 @@
 /*
 	Copyright (C) 2014 by Hugh Bailey <obs.jim@gmail.com>
 	Copyright (C) 2021 DEV47APPS, github.com/dev47apps
+	Copyright (C) 2026 Leonardo Berbert (reworked for the Niriun plugin: Opus, standalone decoder)
 
 	This program is free software: you can redistribute it and/or modify
 	it under the terms of the GNU General Public License as published by
@@ -15,201 +16,156 @@
 	You should have received a copy of the GNU General Public License
 	along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
+#include "ffmpeg_decode.h"
+
+#include <string.h>
 
 #include "plugin.h"
-#include "ffmpeg_decode.h"
+
 extern "C" {
- #include <libavutil/channel_layout.h>
- #include <libavutil/pixdesc.h>
+#include <libavutil/channel_layout.h>
+#include <libavutil/hwcontext.h>
+#include <libavutil/pixdesc.h>
 }
 
-#if LIBAVCODEC_VERSION_INT < AV_VERSION_INT(58, 9, 100)
-#error LIBAVCODEC VERSION 58,9,100 REQUIRED
-#endif
-
 #if LIBAVCODEC_VERSION_INT < AV_VERSION_INT(59, 24, 100)
-#define DECODER_CHANNELS		decoder->channels
-#else
-#define DECODER_CHANNELS		decoder->ch_layout.nb_channels
+#error libavcodec 59.24.100 (FFmpeg 5.1, OBS 29.1) or newer is required
 #endif
 
 // https://trac.ffmpeg.org/wiki/HWAccelIntro
-// https://ffmpeg.org/doxygen/3.4/hw__decode_8c_source.html
-
-enum AVHWDeviceType hw_device_list[] = {
-	#ifdef _WIN32
+static const enum AVHWDeviceType hw_device_list[] = {
+#ifdef _WIN32
 	AV_HWDEVICE_TYPE_D3D11VA,
 	AV_HWDEVICE_TYPE_CUDA,
 	AV_HWDEVICE_TYPE_DXVA2,
-	#endif
-
-	#ifdef __APPLE__
+#endif
+#ifdef __APPLE__
 	AV_HWDEVICE_TYPE_VIDEOTOOLBOX,
-	#endif
-
-	#ifdef __linux__
+#endif
+#ifdef __linux__
 	AV_HWDEVICE_TYPE_CUDA,
-	AV_HWDEVICE_TYPE_VAAPI, AV_HWDEVICE_TYPE_VDPAU,
-	#endif
-
+	AV_HWDEVICE_TYPE_VAAPI,
+	AV_HWDEVICE_TYPE_VDPAU,
+#endif
 	AV_HWDEVICE_TYPE_NONE,
 };
 
-static AVPixelFormat has_hw_type(const AVCodec *c, enum AVHWDeviceType type)
+static enum AVPixelFormat has_hw_type(const AVCodec *c, enum AVHWDeviceType type)
 {
 	for (int i = 0;; i++) {
 		const AVCodecHWConfig *config = avcodec_get_hw_config(c, i);
-		if (!config) {
+		if (!config)
 			break;
-		}
-
-		if ((config->methods & AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX) && config->device_type == type) {
+		if ((config->methods & AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX) && config->device_type == type)
 			return config->pix_fmt;
-		}
 	}
-
 	return AV_PIX_FMT_NONE;
 }
 
-static void init_hw_decoder(FFMpegDecoder *d)
+static const char *hw_pix_fmt_name(enum AVPixelFormat f)
 {
-	enum AVHWDeviceType *hw_device_iter = hw_device_list;
-	AVBufferRef *hw_ctx = NULL;
-
-	while (*hw_device_iter != AV_HWDEVICE_TYPE_NONE) {
-		d->hw_pix_fmt = has_hw_type(d->codec, *hw_device_iter);
-		dlog("trying hw %s => hw_pix_fmt=%d", av_hwdevice_get_type_name(*hw_device_iter), d->hw_pix_fmt);
-		if (d->hw_pix_fmt != AV_PIX_FMT_NONE) {
-			if (av_hwdevice_ctx_create(&hw_ctx, *hw_device_iter, NULL, NULL, 0) == 0)
-				break;
-
-			d->hw_pix_fmt = AV_PIX_FMT_NONE;
-		}
-
-		hw_device_iter++;
-	}
-
-	if (hw_ctx) {
-		d->decoder->hw_device_ctx = av_buffer_ref(hw_ctx);
-		d->hw_ctx = hw_ctx;
-		d->hw = true;
-	} else {
-		enum AVHWDeviceType type = AV_HWDEVICE_TYPE_NONE;
-		ilog("hw accel not supported. available device types:");
-		while((type = av_hwdevice_iterate_types(type)) != AV_HWDEVICE_TYPE_NONE)
-			ilog(" %s", av_hwdevice_get_type_name(type));
-	}
-	ilog("use hw: %d", d->hw);
+	const char *n = av_get_pix_fmt_name(f);
+	return n ? n : "none";
 }
 
-int FFMpegDecoder::init(uint8_t* header, enum AVCodecID id, bool use_hw)
+FFmpegDecoder::~FFmpegDecoder()
 {
-	int ret;
+	if (frame_hw_)
+		av_frame_free(&frame_hw_);
+	if (frame_)
+		av_frame_free(&frame_);
+	if (packet_)
+		av_packet_free(&packet_);
+	if (ctx_)
+		avcodec_free_context(&ctx_);
+	if (hw_ctx_)
+		av_buffer_unref(&hw_ctx_);
+}
 
-	codec = avcodec_find_decoder(id);
-	if (!codec)
-		return -1;
+bool FFmpegDecoder::open(const AVCodec *codec)
+{
+	if (avcodec_open2(ctx_, codec, NULL) < 0)
+		return false;
 
-	decoder = avcodec_alloc_context3(codec);
-	decoder->opaque = this;
+	frame_ = av_frame_alloc();
+	packet_ = av_packet_alloc();
+	if (hw_)
+		frame_hw_ = av_frame_alloc();
+	return frame_ && packet_ && (!hw_ || frame_hw_);
+}
 
-	if (id == AV_CODEC_ID_AAC) {
-		// https://wiki.multimedia.cx/index.php/MPEG-4_Audio
-		static int aac_frequencies[] = {96000,88200,64000,48000,44100,32000,24000,22050,16000,12000,11025,8000};
-		if (!header) {
-			elog("missing AAC header required to init decoder");
-			return -1;
-		}
-
-		int sr_idx = ((header[0] << 1) | (header[1] >> 7)) & 0x1F;
-		if (sr_idx < 0 || sr_idx >= (int)ARRAY_LEN(aac_frequencies)) {
-			elog("failed to parse AAC header, sr_idx=%d [0x%2x 0x%2x]", sr_idx, header[0], header[1]);
-			return -1;
-		}
-
-		decoder->sample_rate = aac_frequencies[sr_idx];
-		#if LIBAVCODEC_VERSION_INT < AV_VERSION_INT(62, 0, 0)
-    	decoder->profile = FF_PROFILE_AAC_LOW;
-		#else
-    	decoder->profile = AV_PROFILE_AAC_LOW;
-		#endif
-
-		const int channels = (header[1] >> 3) & 0xF;
-		#if LIBAVCODEC_VERSION_INT < AV_VERSION_INT(59, 24, 100)
-		decoder->channels = channels;
-		switch (decoder->channels) {
-			case 1:
-				decoder->channel_layout = AV_CH_LAYOUT_MONO;
-				break;
-			case 2:
-				decoder->channel_layout = AV_CH_LAYOUT_STEREO;
-				break;
-			default:
-				decoder->channel_layout = 0; // unknown
-		}
-		#else
-		av_channel_layout_default(&decoder->ch_layout, channels);
-		#endif
-
-		ilog("audio: sample_rate=%d channels=%d", decoder->sample_rate, DECODER_CHANNELS);
+bool FFmpegDecoder::init_video(enum AVCodecID id, bool use_hw)
+{
+	codec_ = avcodec_find_decoder(id);
+	if (!codec_) {
+		elog("no decoder for codec id %d", (int)id);
+		return false;
 	}
+
+	ctx_ = avcodec_alloc_context3(codec_);
+	if (!ctx_)
+		return false;
+
+	// Both flags only take effect when set before avcodec_open2(). Without LOW_DELAY the H.264 decoder holds
+	// frames back to reorder them, which the phone's encoder never needs (no B-frames).
+	ctx_->flags |= AV_CODEC_FLAG_LOW_DELAY;
+	ctx_->flags2 |= AV_CODEC_FLAG2_FAST;
+	ctx_->thread_count = 1;
 
 	if (use_hw) {
-		init_hw_decoder(this);
+		for (const enum AVHWDeviceType *t = hw_device_list; *t != AV_HWDEVICE_TYPE_NONE; t++) {
+			hw_pix_fmt_ = has_hw_type(codec_, *t);
+			if (hw_pix_fmt_ == AV_PIX_FMT_NONE)
+				continue;
+			if (av_hwdevice_ctx_create(&hw_ctx_, *t, NULL, NULL, 0) == 0) {
+				ctx_->hw_device_ctx = av_buffer_ref(hw_ctx_);
+				hw_ = true;
+				ilog("video: hardware decoding via %s (%s)", av_hwdevice_get_type_name(*t), hw_pix_fmt_name(hw_pix_fmt_));
+				break;
+			}
+			hw_pix_fmt_ = AV_PIX_FMT_NONE;
+		}
+		if (!hw_)
+			ilog("video: no hardware decoder available, using software");
 	}
 
-	ret = avcodec_open2(decoder, codec, NULL);
-	if (ret < 0) {
-		return ret;
+	if (!open(codec_)) {
+		elog("could not open %s decoder", codec_->name);
+		return false;
 	}
-
-	// if (codec->capabilities & CODEC_CAP_TRUNC)
-	// 	decoder->flags |= CODEC_FLAG_TRUNC;
-	decoder->flags |= AV_CODEC_FLAG_LOW_DELAY;
-	decoder->flags2 |= AV_CODEC_FLAG2_FAST;
-	// decoder->flags2 |= AV_CODEC_FLAG2_CHUNKS;
-	decoder->thread_type = FF_THREAD_SLICE;
-
-	frame = av_frame_alloc();
-	if (!frame)
-		return -1;
-
-	if (hw) {
-		frame_hw = av_frame_alloc();
-		if (!frame_hw) hw = false;
-	}
-
-	packet = av_packet_alloc();
-	if (!packet)
-		return -1;
-
-	ready = true;
-	return 0;
+	return true;
 }
 
-FFMpegDecoder::~FFMpegDecoder(void)
+bool FFmpegDecoder::init_opus()
 {
-	if (frame_hw)
-		av_frame_free(&frame_hw);
+	codec_ = avcodec_find_decoder(AV_CODEC_ID_OPUS);
+	if (!codec_) {
+		elog("this FFmpeg build has no Opus decoder");
+		return false;
+	}
 
-	if (frame)
-		av_frame_free(&frame);
+	ctx_ = avcodec_alloc_context3(codec_);
+	if (!ctx_)
+		return false;
 
-	if (hw_ctx)
-		av_buffer_unref(&hw_ctx);
+	ctx_->sample_rate = 48000;
+	av_channel_layout_default(&ctx_->ch_layout, 1);
 
-	if (packet)
-		av_packet_free(&packet);
+	// The phone sends bare Opus packets; give the decoder the OpusHead it would otherwise find in an Ogg stream
+	// (version 1, 1 channel, no pre-skip, 48000 Hz, 0 dB gain, channel mapping family 0).
+	static const uint8_t head[19] = {'O', 'p', 'u', 's', 'H', 'e', 'a', 'd', 1, 1, 0, 0, 0x80, 0xBB, 0, 0, 0, 0, 0};
+	ctx_->extradata = (uint8_t *)av_mallocz(sizeof(head) + AV_INPUT_BUFFER_PADDING_SIZE);
+	if (!ctx_->extradata)
+		return false;
+	memcpy(ctx_->extradata, head, sizeof(head));
+	ctx_->extradata_size = (int)sizeof(head);
 
-	if (decoder)
-		avcodec_free_context(&decoder);
+	if (!open(codec_)) {
+		elog("could not open the Opus decoder");
+		return false;
+	}
+	return true;
 }
-
-// TODO:
-// add AV_PIX_FMT_YUVJ420P to obs-ffmpeg-formats.h
-// add convert_color_space to obs-ffmpeg-formats.h
-// remove these duplicates (also in win-dshow)
-// Clean obs-ffmpeg-compat.h duplicate (plugins/obs-ffmpeg & libobs)
 
 static inline enum video_format convert_pixel_format(int f)
 {
@@ -226,23 +182,18 @@ static inline enum video_format convert_pixel_format(int f)
 	case AV_PIX_FMT_YUV422P:
 	case AV_PIX_FMT_YUVJ422P:
 		return VIDEO_FORMAT_I422;
-
-	#if LIBOBS_API_MAJOR_VER >= 28
 	case AV_PIX_FMT_YUV420P10LE:
 		return VIDEO_FORMAT_I010;
 	case AV_PIX_FMT_P010LE:
 		return VIDEO_FORMAT_P010;
 	case AV_PIX_FMT_YUV422P10LE:
 		return VIDEO_FORMAT_I210;
-	#endif
 	}
-
 	return VIDEO_FORMAT_NONE;
 }
 
-static enum video_colorspace
-convert_color_space(enum AVColorSpace s, enum AVColorTransferCharacteristic trc,
-					enum AVColorPrimaries color_primaries)
+static enum video_colorspace convert_color_space(enum AVColorSpace s, enum AVColorTransferCharacteristic trc,
+						 enum AVColorPrimaries color_primaries)
 {
 	switch (s) {
 	case AVCOL_SPC_BT709:
@@ -252,19 +203,31 @@ convert_color_space(enum AVColorSpace s, enum AVColorTransferCharacteristic trc,
 	case AVCOL_SPC_SMPTE170M:
 	case AVCOL_SPC_SMPTE240M:
 		return VIDEO_CS_601;
-#if LIBOBS_API_MAJOR_VER < 28
-	default:
-		return VIDEO_CS_DEFAULT;
-
-#else
 	case AVCOL_SPC_BT2020_NCL:
 		return (trc == AVCOL_TRC_ARIB_STD_B67) ? VIDEO_CS_2100_HLG : VIDEO_CS_2100_PQ;
-
 	default:
 		return (color_primaries == AVCOL_PRI_BT2020)
-				? ((trc == AVCOL_TRC_ARIB_STD_B67) ? VIDEO_CS_2100_HLG : VIDEO_CS_2100_PQ)
-				: VIDEO_CS_DEFAULT;
-#endif
+			       ? ((trc == AVCOL_TRC_ARIB_STD_B67) ? VIDEO_CS_2100_HLG : VIDEO_CS_2100_PQ)
+			       : VIDEO_CS_DEFAULT;
+	}
+}
+
+static inline enum video_trc convert_trc(enum AVColorTransferCharacteristic trc)
+{
+	switch (trc) {
+	case AVCOL_TRC_BT709:
+	case AVCOL_TRC_GAMMA22:
+	case AVCOL_TRC_GAMMA28:
+	case AVCOL_TRC_SMPTE170M:
+	case AVCOL_TRC_SMPTE240M:
+	case AVCOL_TRC_IEC61966_2_1:
+		return VIDEO_TRC_SRGB;
+	case AVCOL_TRC_SMPTE2084:
+		return VIDEO_TRC_PQ;
+	case AVCOL_TRC_ARIB_STD_B67:
+		return VIDEO_TRC_HLG;
+	default:
+		return VIDEO_TRC_DEFAULT;
 	}
 }
 
@@ -289,7 +252,6 @@ static inline enum audio_format convert_sample_format(int f)
 		return AUDIO_FORMAT_FLOAT_PLANAR;
 	default:;
 	}
-
 	return AUDIO_FORMAT_UNKNOWN;
 }
 
@@ -300,204 +262,143 @@ static inline enum speaker_layout convert_speaker_layout(int channels)
 		return SPEAKERS_MONO;
 	case 2:
 		return SPEAKERS_STEREO;
-	case 3:
-		return SPEAKERS_2POINT1;
-	case 4:
-		return SPEAKERS_4POINT0;
-	case 5:
-		return SPEAKERS_4POINT1;
-	case 6:
-		return SPEAKERS_5POINT1;
-	case 8:
-		return SPEAKERS_7POINT1;
 	default:
 		return SPEAKERS_UNKNOWN;
 	}
 }
 
-DataPacket* FFMpegDecoder::pull_empty_packet(size_t size)
+// Fills the format/colour fields of `out` for picture `f`, only when something changed since the last call.
+bool FFmpegDecoder::describe_picture(const AVFrame *f, struct obs_source_frame2 *out)
 {
-	size_t new_size = size + AV_INPUT_BUFFER_PADDING_SIZE;
-	DataPacket* packet = Decoder::pull_empty_packet(new_size);
-	memset(packet->data, 0, new_size);
-	return packet;
+	enum video_format format = convert_pixel_format(f->format);
+	if (format == VIDEO_FORMAT_NONE) {
+		elog("unsupported pixel format %s", hw_pix_fmt_name((enum AVPixelFormat)f->format));
+		return false;
+	}
+
+	const enum video_range_type range = (f->color_range == AVCOL_RANGE_JPEG) ? VIDEO_RANGE_FULL : VIDEO_RANGE_PARTIAL;
+
+	enum video_colorspace cs = convert_color_space(f->colorspace, f->color_trc, f->color_primaries);
+	if (color_matrix_ == ColorMatrix::REC601)
+		cs = VIDEO_CS_601;
+	else if (color_matrix_ == ColorMatrix::REC709 && cs != VIDEO_CS_2100_HLG && cs != VIDEO_CS_2100_PQ)
+		cs = VIDEO_CS_709;
+
+	const enum video_trc trc = convert_trc(f->color_trc);
+
+	if ((int)format != cfg_pix_fmt_ || (int)range != cfg_range_ || (int)cs != cfg_cs_ || (int)trc != cfg_trc_) {
+		ilog("video: %s %dx%d, colorspace %s (stream says %s / %s), %s range", get_video_format_name(format),
+		     f->width, f->height, get_video_colorspace_name(cs), av_color_space_name(f->colorspace),
+		     av_color_primaries_name(f->color_primaries), range == VIDEO_RANGE_FULL ? "full" : "limited");
+
+		out->format = format;
+		out->range = range;
+		out->trc = trc;
+		video_format_get_parameters_for_format(cs, range, format, out->color_matrix, out->color_range_min,
+						       out->color_range_max);
+		cfg_pix_fmt_ = (int)format;
+		cfg_range_ = (int)range;
+		cfg_cs_ = (int)cs;
+		cfg_trc_ = (int)trc;
+	}
+	return true;
 }
 
-void FFMpegDecoder::push_ready_packet(DataPacket* packet)
+bool FFmpegDecoder::decode_video(const uint8_t *data, size_t size, int64_t pts, struct obs_source_frame2 *out,
+				 bool *got_output)
 {
-	if (catchup) {
-		// Discard all incoming frames until the decoder has drained the queue
-		if (decodeQueue.items.size() > 1){
-			recieveQueue.add_item(packet);
-			return;
-		}
-
-		// Discard P/B frames and continue on anything higher
-		if (codec->id == AV_CODEC_ID_H264) {
-			int nalType = packet->data[2] == 1 ? (packet->data[3] & 0x1f) : (packet->data[4] & 0x1f);
-			if (nalType < 5) {
-				dlog("discard non-keyframe (AVC)");
-				recieveQueue.add_item(packet);
-				return;
-			}
-		}
-		else if (codec->id == AV_CODEC_ID_H265) {
-			int nalType = packet->data[2] == 1 ? ((packet->data[3] >> 1) & 0x3f) : ((packet->data[4] >> 1) & 0x3f);
-			if (nalType < 10) {
-				dlog("discard non-keyframe (HEVC)");
-				recieveQueue.add_item(packet);
-				return;
-			}
-		}
-
-		ilog("decoder catchup: decodeQueue: %ld recieveQueue: %ld", decodeQueue.items.size(), recieveQueue.items.size());
-		catchup = false;
-	}
-
-	decodeQueue.add_item(packet);
-
-	// ((uint64_t)plugin->obs_audio_frame.frames * MILLI_SEC / (uint64_t)plugin->obs_audio_frame.samples_per_sec)
-	// At 44100HZ, 1 AAC Frame = 23ms
-	if (codec->id == AV_CODEC_ID_AAC && decodeQueue.items.size() > (1000/23)) {
-		catchup = true;
-	}
-	else if (decodeQueue.items.size() > 30) { // AVC, HEVC
-		catchup = true;
-	}
-}
-
-bool FFMpegDecoder::decode_video(struct obs_source_frame2* obs_frame, DataPacket* data_packet,
-		bool *got_output)
-{
-	int ret;
-	AVFrame *out_frame;
 	*got_output = false;
 
-	packet->data = data_packet->data;
-	packet->size = data_packet->used;
-	packet->pts = (data_packet->pts == NO_PTS) ? AV_NOPTS_VALUE : data_packet->pts;
+	av_frame_unref(frame_);
+	if (frame_hw_)
+		av_frame_unref(frame_hw_);
 
-	if (decoder->has_b_frames && !b_frame_check) {
-		elog("WARNING Stream has b-frames!");
-		b_frame_check = true;
+	packet_->data = (uint8_t *)data;
+	packet_->size = (int)size;
+	packet_->pts = pts;
+
+	int ret = avcodec_send_packet(ctx_, packet_);
+	if (ret < 0 && ret != AVERROR(EAGAIN)) {
+		// Damaged or incomplete data (for instance a P-frame after a lost IDR). Skip it; the encoder sends a
+		// new IDR every couple of seconds. Only give up when nothing decodes for a long time. The very first
+		// rejection is silent: the H.264 decoder answers "no frame!" to the packet that carries only SPS/PPS.
+		if (++damaged_ == 2 || damaged_ % 60 == 0)
+			elog("video: packet rejected by the decoder (%d), %u in a row", ret, damaged_);
+		return ret == AVERROR_INVALIDDATA && damaged_ < 300;
 	}
 
-	ret = avcodec_send_packet(decoder, packet);
-	if (ret == 0) {
-		out_frame = hw ? frame_hw : frame;
-		ret = avcodec_receive_frame(decoder, out_frame);
-		if (ret == 0) goto GOT_FRAME;
+	AVFrame *decoded = hw_ ? frame_hw_ : frame_;
+	ret = avcodec_receive_frame(ctx_, decoded);
+	if (ret == AVERROR(EAGAIN))
+		return true;  // parameter sets only, or the decoder needs more data
+	if (ret < 0) {
+		if (++damaged_ == 2 || damaged_ % 60 == 0)
+			elog("video: decode error %d, %u in a row", ret, damaged_);
+		return ret == AVERROR_INVALIDDATA && damaged_ < 300;
 	}
+	damaged_ = 0;
 
-	return ret == AVERROR(EAGAIN);
-
-GOT_FRAME:
-	if (hw) {
-		if (frame_hw->format == hw_pix_fmt) {
-			if (av_hwframe_transfer_data(frame, frame_hw, 0) != 0
-					|| av_frame_copy_props(frame, frame_hw) != 0)
-				return false;
-			out_frame = frame;
+	AVFrame *picture = decoded;
+	if (hw_ && decoded->format == hw_pix_fmt_) {
+		if (av_hwframe_transfer_data(frame_, decoded, 0) != 0 || av_frame_copy_props(frame_, decoded) != 0) {
+			elog("video: copying the picture from the GPU failed");
+			return false;
 		}
+		picture = frame_;
 	}
+
+	if (!describe_picture(picture, out))
+		return false;
 
 	for (int i = 0; i < MAX_AV_PLANES; i++) {
-		obs_frame->data[i]     = out_frame->data[i];
-		obs_frame->linesize[i] = out_frame->linesize[i];
+		out->data[i] = picture->data[i];
+		out->linesize[i] = (uint32_t)picture->linesize[i];
 	}
-
-	if (obs_frame->format == VIDEO_FORMAT_NONE) {
-		obs_frame->format = convert_pixel_format(out_frame->format);
-		ilog("format = %s", get_video_format_name(obs_frame->format));
-		if (obs_frame->format == VIDEO_FORMAT_NONE)
-			return false;
-
-		#if LIBOBS_API_MAJOR_VER >= 28
-		switch (out_frame->color_trc) {
-		case AVCOL_TRC_BT709:
-		case AVCOL_TRC_GAMMA22:
-		case AVCOL_TRC_GAMMA28:
-		case AVCOL_TRC_SMPTE170M:
-		case AVCOL_TRC_SMPTE240M:
-		case AVCOL_TRC_IEC61966_2_1:
-			obs_frame->trc = VIDEO_TRC_SRGB;
-			break;
-		case AVCOL_TRC_SMPTE2084:
-			obs_frame->trc = VIDEO_TRC_PQ;
-			break;
-		case AVCOL_TRC_ARIB_STD_B67:
-			obs_frame->trc = VIDEO_TRC_HLG;
-			break;
-		default:
-			obs_frame->trc = VIDEO_TRC_DEFAULT;
-		}
-		dlog("trc    = %d (from %s)", obs_frame->trc, av_color_transfer_name(out_frame->color_trc));
-
-		#endif
-	}
-
-	enum video_range_type range =
-		(out_frame->color_range == AVCOL_RANGE_JPEG)
-		? VIDEO_RANGE_FULL : VIDEO_RANGE_PARTIAL;
-
-	if (range != obs_frame->range) {
-		const enum video_colorspace cs = convert_color_space(
-			out_frame->colorspace, out_frame->color_trc,
-			out_frame->color_primaries);
-
-		ilog("colorspace = %s (from %s / %s)",
-			get_video_colorspace_name(cs),
-			av_color_space_name(out_frame->colorspace),
-			av_color_primaries_name(out_frame->color_primaries));
-
-		#if LIBOBS_API_MAJOR_VER < 28
-		video_format_get_parameters(
-			cs, range, obs_frame->color_matrix,
-		#else
-		video_format_get_parameters_for_format(
-			cs, range, obs_frame->format, obs_frame->color_matrix,
-		#endif
-			obs_frame->color_range_min, obs_frame->color_range_max);
-
-		obs_frame->range = range;
-	}
-
-	obs_frame->width = out_frame->width;
-	obs_frame->height = out_frame->height;
-	obs_frame->flip = false;
+	out->width = (uint32_t)picture->width;
+	out->height = (uint32_t)picture->height;
+	out->flip = false;
 
 	*got_output = true;
 	return true;
 }
 
-bool FFMpegDecoder::decode_audio(struct obs_source_audio* obs_frame, DataPacket* data_packet, bool *got_output)
+bool FFmpegDecoder::decode_audio(const uint8_t *data, size_t size, struct obs_source_audio *out, bool *got_output)
 {
-	int ret;
 	*got_output = false;
 
-	packet->data = data_packet->data;
-	packet->size = data_packet->used;
-	packet->pts = (data_packet->pts == NO_PTS) ? AV_NOPTS_VALUE : data_packet->pts;
+	av_frame_unref(frame_);
+	packet_->data = (uint8_t *)data;
+	packet_->size = (int)size;
+	packet_->pts = AV_NOPTS_VALUE;
 
-	ret = avcodec_send_packet(decoder, packet);
-	if (ret == 0) {
-		ret = avcodec_receive_frame(decoder, frame);
-		if (ret == 0) goto GOT_FRAME;
+	int ret = avcodec_send_packet(ctx_, packet_);
+	if (ret < 0 && ret != AVERROR(EAGAIN)) {
+		if (audio_errors_++ % 100 == 0)
+			elog("audio: packet rejected by the decoder (%d), %u so far", ret, audio_errors_);
+		return ret == AVERROR_INVALIDDATA;  // one bad 20 ms packet is not fatal
 	}
 
-	return ret == AVERROR(EAGAIN);
+	ret = avcodec_receive_frame(ctx_, frame_);
+	if (ret == AVERROR(EAGAIN))
+		return true;
+	if (ret < 0) {
+		if (audio_errors_++ % 100 == 0)
+			elog("audio: decode error %d, %u so far", ret, audio_errors_);
+		return ret == AVERROR_INVALIDDATA;
+	}
 
-GOT_FRAME:
+	const enum audio_format format = convert_sample_format(frame_->format);
+	if (format == AUDIO_FORMAT_UNKNOWN) {
+		elog("audio: unsupported sample format %d", frame_->format);
+		return false;
+	}
+
 	for (size_t i = 0; i < MAX_AV_PLANES; i++)
-		obs_frame->data[i] = frame->data[i];
-
-	obs_frame->samples_per_sec = frame->sample_rate;
-	obs_frame->frames = frame->nb_samples;
-
-	if (obs_frame->format == AUDIO_FORMAT_UNKNOWN) {
-		obs_frame->format = convert_sample_format(frame->format);
-		obs_frame->speakers = convert_speaker_layout(DECODER_CHANNELS);
-	}
+		out->data[i] = frame_->data[i];
+	out->samples_per_sec = (uint32_t)frame_->sample_rate;
+	out->frames = (uint32_t)frame_->nb_samples;
+	out->format = format;
+	out->speakers = convert_speaker_layout(frame_->ch_layout.nb_channels);
 
 	*got_output = true;
 	return true;

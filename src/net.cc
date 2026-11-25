@@ -1,5 +1,6 @@
 /*
 Copyright (C) 2021 DEV47APPS, github.com/dev47apps
+Copyright (C) 2026 Leonardo Berbert (rewritten for the Niriun protocol)
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -14,322 +15,55 @@ GNU General Public License for more details.
 You should have received a copy of the GNU General Public License
 along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
-
-#include <errno.h>
-#include <string.h>
-#include "plugin.h"
-#include "plugin_properties.h"
 #include "net.h"
 
+#include <errno.h>
+#include <stdio.h>
+#include <string.h>
+
+#include "plugin.h"
+
 #ifdef _WIN32
-  #include <ws2tcpip.h>
-  #pragma comment(lib,"ws2_32.lib")
-  typedef int socklen_t;
+#pragma comment(lib, "ws2_32.lib")
+typedef int socklen_t;
+#define NET_ERRNO() WSAGetLastError()
 #else
-# include <arpa/inet.h>
-# include <sys/types.h>
-# include <sys/socket.h>
-# include <netdb.h>
-# include <fcntl.h>
-# include <unistd.h>
+#include <arpa/inet.h>
+#include <fcntl.h>
+#include <netdb.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
+#include <sys/socket.h>
+#include <sys/types.h>
+#include <unistd.h>
+#define NET_ERRNO() errno
 #endif
 
-bool set_nonblock(socket_t sock, int nonblock) {
-#ifdef _WIN32
-    u_long nb = nonblock;
-    return (NO_ERROR == ioctlsocket(sock, FIONBIO, &nb));
-#else
-    int flags = fcntl(sock, F_GETFL, NULL);
-    if (flags < 0) {
-        elog("fcntl(): %s", strerror(errno));
-        return false;
-    }
-
-    if (nonblock)
-        flags |= O_NONBLOCK;
-    else
-        flags &= ~O_NONBLOCK;
-
-    if (fcntl(sock, F_SETFL, flags) < 0) {
-        elog("fcntl(): %s", strerror(errno));
-        return false;
-    }
-
-    return true;
-#endif
-}
-
-// https://stackoverflow.com/a/2939145
-int set_recv_timeout(socket_t sock, int tv_sec) {
-#if _WIN32
-    DWORD timeout = tv_sec * 1000;
-#else
-    struct timeval timeout;
-    timeout.tv_sec = tv_sec;
-    timeout.tv_usec = 0;
-#endif
-
-    return setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO,
-        (char*)&timeout, sizeof(timeout));
-}
-
-int set_recv_buf_len(socket_t sock, int len) {
-    return setsockopt(sock, SOL_SOCKET, SO_RCVBUF, (char *) &len, sizeof(int));
-}
-
-socket_t
-net_listen(const char* addr, uint16_t port) {
-    socket_t sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    if (sock == INVALID_SOCKET) {
-        WSAErrno();
-        elog("socket(): %s", strerror(errno));
-        return INVALID_SOCKET;
-    }
-
-    struct sockaddr_in sa = {0};
-    sa.sin_family = AF_INET;
-    sa.sin_addr.s_addr = inet_addr(addr);
-    sa.sin_port = htons(port);
-
-    const int on = 1;
-    setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, (char*)&on, sizeof(int));
-    #if _WIN32
-    setsockopt(sock, SOL_SOCKET, SO_EXCLUSIVEADDRUSE, (char*)&on, sizeof(int));
-    #endif
-    set_nonblock(sock, on);
-
-    if (bind(sock, (struct sockaddr *) &sa, sizeof(sa)) < 0) {
-        WSAErrno();
-        elog("bind(): %s", strerror(errno));
-        goto fail;
-    }
-
-    if (listen(sock, 8) < 0) {
-        WSAErrno();
-        elog("listen(): %s", strerror(errno));
-        fail:
-        net_close(sock);
-        return INVALID_SOCKET;
-    }
-
-    dlog("created server on %s:%d", addr, net_listen_port(sock));
-    return sock;
-}
-
-int
-net_listen_port(socket_t sock) {
-    struct sockaddr_in sa;
-    socklen_t len = sizeof(sa);
-    if (getsockname(sock, (struct sockaddr *)&sa, &len) < 0) {
-        WSAErrno();
-        elog("getsockname(): %s", strerror(errno));
-        return 0;
-    }
-
-    return ntohs(sa.sin_port);
-}
-
-socket_t
-net_accept(socket_t sock) {
-    return accept(sock, NULL, 0);
-}
-
-struct sockaddr*
-net_sock_addr(const char* host) {
-    struct addrinfo hints = {0}, *addr = 0, *addrs = 0;
-
-    hints.ai_family = AF_UNSPEC;
-    hints.ai_socktype = SOCK_STREAM;
-    hints.ai_protocol = IPPROTO_TCP;
-
-    if (getaddrinfo(host, NULL, &hints, &addrs) != 0) {
-        WSAErrno();
-        elog("getaddrinfo failed (%d): %s", errno, strerror(errno));
-        return NULL;
-    }
-
-    addr = addrs;
-
-    return addr->ai_addr;
-}
-
-socket_t
-net_connect(struct addrinfo *addr, struct sockaddr* bind_saddr, uint16_t port) {
-    struct sockaddr* ai_addr = addr->ai_addr;
-    void *in_addr;
-    int rc;
-
-    switch (ai_addr->sa_family) {
-        case AF_INET: {
-            struct sockaddr_in* sa = (struct sockaddr_in*) ai_addr;
-            in_addr = &(sa->sin_addr);
-            sa->sin_port = htons(port);
-            break;
-        }
-        case AF_INET6: {
-            struct sockaddr_in6* sa = (struct sockaddr_in6*) ai_addr;
-            in_addr = &(sa->sin6_addr);
-            sa->sin6_port = htons(port);
-            break;
-        }
-    }
-
-    #ifdef DEBUG
-    char str[INET6_ADDRSTRLEN] = {0};
-    inet_ntop(addr->ai_family, in_addr, str, sizeof(str));
-    dlog("trying %s", str);
-    #else
-    (void) in_addr;
-    #endif
-
-    socket_t sock = socket(addr->ai_family, addr->ai_socktype, addr->ai_protocol);
-    if (sock == INVALID_SOCKET) {
-        WSAErrno();
-        elog("socket(): %s", strerror(errno));
-        return INVALID_SOCKET;
-    }
-
-    if (bind_saddr && bind_saddr->sa_family == ai_addr->sa_family) {
-        const size_t addrlen = (bind_saddr->sa_family == AF_INET)
-            ? sizeof(struct sockaddr_in)
-            : sizeof(struct sockaddr_in6);
-
-        if (bind(sock, bind_saddr, addrlen) < 0) {
-            WSAErrno();
-            elog("bind failed: %s", strerror(errno));
-        }
-    }
-
-    struct timeval timeout;
-    timeout.tv_sec = 2;
-    timeout.tv_usec = 0;
-
-    fd_set set;
-    FD_ZERO(&set);
-    FD_SET(sock, &set);
-
-    if (!set_nonblock(sock, 1)) {
-        goto ERROR_OUT;
-    }
-
-    connect(sock, addr->ai_addr, addr->ai_addrlen);
-
-#if _WIN32
-    if (WSAGetLastError() != WSAEWOULDBLOCK)
-        goto ERROR_OUT;
-#else
-    if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINPROGRESS) {
-        WSAErrno();
-        elog("connect(): %s", strerror(errno));
-        goto ERROR_OUT;
-    }
-#endif
-
-    rc = select(sock+1, NULL, &set, NULL, &timeout);
-    if (rc == 0)
-        goto ERROR_OUT;
-
-    if (rc < 0) {
-        WSAErrno();
-        elog("connect failed: %s", strerror(errno));
-        goto ERROR_OUT;
-    }
-
-    if (!set_nonblock(sock, 0)) {
-    ERROR_OUT:
-        net_close(sock);
-        return INVALID_SOCKET;
-    }
-
-    return sock;
-}
-
-socket_t
-net_connect(const char* host, const char* bindIP, uint16_t port) {
-    dlog("connect: %s port %d / bindIP=%s", host, port, bindIP);
-
-    struct sockaddr* bind_saddr = NULL;
-    if (bindIP && bindIP[0]) {
-        bind_saddr = net_sock_addr(bindIP);
-    }
-
-    struct addrinfo hints = {0}, *addr = 0, *addrs = 0;
-    hints.ai_family = AF_UNSPEC;
-    hints.ai_socktype = SOCK_STREAM;
-    hints.ai_protocol = IPPROTO_TCP;
-
-    if (getaddrinfo(host, NULL, &hints, &addrs) != 0) {
-        WSAErrno();
-        elog("getaddrinfo failed (%d): %s", errno, strerror(errno));
-        return INVALID_SOCKET;
-    }
-
-    addr = addrs;
-    do {
-        socket_t sock = net_connect(addr, bind_saddr, port);
-        if (sock != INVALID_SOCKET) {
-            set_recv_timeout(sock, 5);
-            return sock;
-        }
-    } while ((addr = addr->ai_next) != NULL);
-
-    freeaddrinfo(addrs);
-    return INVALID_SOCKET;
-}
-
-ssize_t
-net_recv(socket_t sock, void *buf, size_t len) {
-#if _WIN32
-    return recv(sock, (char*)buf, len, 0);
-#else
-    return recv(sock, buf, len, 0);
-#endif
-}
-
-ssize_t
-net_recv_peek(socket_t sock) {
-    char buf[4];
-    return recv(sock, buf, 1, MSG_PEEK);
-}
-
-ssize_t
-net_recv_all(socket_t sock, void *buf, size_t len) {
-#if _WIN32
-    return recv(sock, (char*)buf, len, MSG_WAITALL);
-#else
-    return recv(sock, buf, len, MSG_WAITALL);
-#endif
-}
-
-ssize_t
-net_send(socket_t sock, const void *buf, size_t len) {
-#if _WIN32
-    return send(sock, (const char*)buf, len, 0);
-#else
-    return send(sock, buf, len, 0);
-#endif
-
-}
-
-ssize_t
-net_send_all(socket_t sock, const void *buf, size_t len) {
-    ssize_t w = 0;
-    char *ptr = (char*) buf;
-    while (len > 0) {
-        w = send(sock, ptr, len, 0);
-        if (w <= 0) {
-            return -1;
-        }
-        len -= w;
-        ptr += w;
-    }
-    return 1;
-}
-
-void
-net_close(socket_t sock)
+bool net_init(void)
 {
-    shutdown(sock, SHUT_RDWR);
+#ifdef _WIN32
+    WSADATA wsa;
+    int rc = WSAStartup(MAKEWORD(2, 2), &wsa);
+    if (rc != 0) {
+        elog("WSAStartup failed with error %d", rc);
+        return false;
+    }
+#endif
+    return true;
+}
+
+void net_cleanup(void)
+{
+#ifdef _WIN32
+    WSACleanup();
+#endif
+}
+
+void net_close(socket_t sock)
+{
+    if (sock == INVALID_SOCKET)
+        return;
+    shutdown(sock, 2 /* SD_BOTH == SHUT_RDWR */);
 #ifdef _WIN32
     closesocket(sock);
 #else
@@ -337,22 +71,233 @@ net_close(socket_t sock)
 #endif
 }
 
-bool
-net_init(void) {
+bool set_nonblock(socket_t sock, bool nonblock)
+{
 #ifdef _WIN32
-    WSADATA wsa;
-    int res = WSAStartup(MAKEWORD(2, 2), &wsa) < 0;
-    if (res < 0) {
-        elog("WSAStartup failed with error %d", res);
+    u_long nb = nonblock ? 1 : 0;
+    return ioctlsocket(sock, FIONBIO, &nb) == 0;
+#else
+    int flags = fcntl(sock, F_GETFL, 0);
+    if (flags < 0)
         return false;
-    }
+    flags = nonblock ? (flags | O_NONBLOCK) : (flags & ~O_NONBLOCK);
+    return fcntl(sock, F_SETFL, flags) == 0;
 #endif
+}
+
+int set_recv_buf_len(socket_t sock, int len)
+{
+    return setsockopt(sock, SOL_SOCKET, SO_RCVBUF, (const char *)&len, sizeof(len));
+}
+
+int set_send_timeout(socket_t sock, int ms)
+{
+#ifdef _WIN32
+    DWORD timeout = (DWORD)ms;
+#else
+    struct timeval timeout;
+    timeout.tv_sec = ms / 1000;
+    timeout.tv_usec = (ms % 1000) * 1000;
+#endif
+    return setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, (const char *)&timeout, sizeof(timeout));
+}
+
+int net_poll(struct pollfd *fds, unsigned count, int timeout_ms)
+{
+#ifdef _WIN32
+    return WSAPoll(fds, count, timeout_ms);
+#else
+    return poll(fds, count, timeout_ms);
+#endif
+}
+
+int net_wait_readable(socket_t sock, int timeout_ms)
+{
+    struct pollfd p;
+    p.fd = sock;
+    p.events = POLLIN;
+    p.revents = 0;
+    int rc = net_poll(&p, 1, timeout_ms);
+    if (rc < 0)
+        return -1;
+    return rc == 0 ? 0 : 1;
+}
+
+bool net_connect_ok(socket_t sock)
+{
+    int err = 0;
+    socklen_t len = sizeof(err);
+    if (getsockopt(sock, SOL_SOCKET, SO_ERROR, (char *)&err, &len) != 0)
+        return false;
+    return err == 0;
+}
+
+static bool connect_in_progress()
+{
+#ifdef _WIN32
+    return WSAGetLastError() == WSAEWOULDBLOCK;
+#else
+    return errno == EINPROGRESS || errno == EAGAIN || errno == EWOULDBLOCK;
+#endif
+}
+
+socket_t net_connect_begin_v4(uint32_t addr, uint16_t port)
+{
+    socket_t sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (sock == INVALID_SOCKET)
+        return INVALID_SOCKET;
+
+    struct sockaddr_in sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sin_family = AF_INET;
+    sa.sin_addr.s_addr = htonl(addr);
+    sa.sin_port = htons(port);
+
+    if (!set_nonblock(sock, true)) {
+        net_close(sock);
+        return INVALID_SOCKET;
+    }
+
+    if (connect(sock, (const struct sockaddr *)&sa, sizeof(sa)) != 0 && !connect_in_progress()) {
+        net_close(sock);
+        return INVALID_SOCKET;
+    }
+    return sock;
+}
+
+static socket_t connect_one(const struct addrinfo *ai, const struct sockaddr_storage *bind_addr, int bind_len,
+                            int timeout_ms, const std::atomic<bool> *cancel)
+{
+    socket_t sock = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
+    if (sock == INVALID_SOCKET) {
+        elog("socket(): error %d", NET_ERRNO());
+        return INVALID_SOCKET;
+    }
+
+    if (bind_addr && bind_addr->ss_family == ai->ai_family) {
+        if (bind(sock, (const struct sockaddr *)bind_addr, bind_len) != 0)
+            elog("bind to local address failed: error %d", NET_ERRNO());
+    }
+
+    if (!set_nonblock(sock, true))
+        goto fail;
+
+    if (connect(sock, ai->ai_addr, (int)ai->ai_addrlen) != 0 && !connect_in_progress()) {
+        dlog("connect(): error %d", NET_ERRNO());
+        goto fail;
+    }
+
+    {
+        // Wait in short slices so a cancel (source destroyed, settings changed) is honoured quickly.
+        int waited = 0;
+        for (;;) {
+            struct pollfd p;
+            p.fd = sock;
+            p.events = POLLOUT;
+            p.revents = 0;
+            int rc = net_poll(&p, 1, 50);
+            if (rc < 0)
+                goto fail;
+            if (rc > 0)
+                break;
+            waited += 50;
+            if (waited >= timeout_ms || (cancel && cancel->load()))
+                goto fail;
+        }
+    }
+
+    if (!net_connect_ok(sock) || !set_nonblock(sock, false))
+        goto fail;
+
+    {
+        int on = 1;
+        setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, (const char *)&on, sizeof(on));
+    }
+    return sock;
+
+fail:
+    net_close(sock);
+    return INVALID_SOCKET;
+}
+
+socket_t net_connect(const char *host, const char *bind_ip, uint16_t port, int timeout_ms,
+                     const std::atomic<bool> *cancel)
+{
+    struct addrinfo hints;
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+    hints.ai_protocol = IPPROTO_TCP;
+
+    char port_str[8];
+    snprintf(port_str, sizeof(port_str), "%u", (unsigned)port);
+
+    struct addrinfo *addrs = NULL;
+    if (getaddrinfo(host, port_str, &hints, &addrs) != 0 || !addrs) {
+        elog("getaddrinfo(%s) failed: error %d", host, NET_ERRNO());
+        return INVALID_SOCKET;
+    }
+
+    struct sockaddr_storage bind_addr;
+    int bind_len = 0;
+    memset(&bind_addr, 0, sizeof(bind_addr));
+    if (bind_ip && bind_ip[0]) {
+        struct addrinfo *b = NULL;
+        if (getaddrinfo(bind_ip, NULL, &hints, &b) == 0 && b) {
+            memcpy(&bind_addr, b->ai_addr, b->ai_addrlen);
+            bind_len = (int)b->ai_addrlen;
+        }
+        if (b)
+            freeaddrinfo(b);
+    }
+
+    socket_t sock = INVALID_SOCKET;
+    for (const struct addrinfo *ai = addrs; ai; ai = ai->ai_next) {
+        if (cancel && cancel->load())
+            break;
+        sock = connect_one(ai, bind_len ? &bind_addr : NULL, bind_len, timeout_ms, cancel);
+        if (sock != INVALID_SOCKET)
+            break;
+    }
+
+    freeaddrinfo(addrs);
+    return sock;
+}
+
+ssize_t net_recv(socket_t sock, void *buf, size_t len)
+{
+    return recv(sock, (char *)buf, (int)len, 0);
+}
+
+bool net_send_all(socket_t sock, const void *buf, size_t len)
+{
+    const char *ptr = (const char *)buf;
+    while (len > 0) {
+#ifdef _WIN32
+        int w = send(sock, ptr, (int)len, 0);
+#else
+        ssize_t w = send(sock, ptr, len, MSG_NOSIGNAL);
+#endif
+        if (w <= 0)
+            return false;
+        len -= (size_t)w;
+        ptr += w;
+    }
     return true;
 }
 
-void
-net_cleanup(void) {
-#ifdef _WIN32
-    WSACleanup();
-#endif
+std::string net_peer_ip(socket_t sock)
+{
+    struct sockaddr_storage ss;
+    socklen_t len = sizeof(ss);
+    if (getpeername(sock, (struct sockaddr *)&ss, &len) != 0)
+        return std::string();
+
+    char buf[INET6_ADDRSTRLEN] = {0};
+    if (ss.ss_family == AF_INET) {
+        inet_ntop(AF_INET, &((struct sockaddr_in *)&ss)->sin_addr, buf, sizeof(buf));
+    } else if (ss.ss_family == AF_INET6) {
+        inet_ntop(AF_INET6, &((struct sockaddr_in6 *)&ss)->sin6_addr, buf, sizeof(buf));
+    }
+    return std::string(buf);
 }

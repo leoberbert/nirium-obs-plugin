@@ -57,7 +57,7 @@ cmd_execute(const char *path, const char *const argv[], HANDLE *handle, char* ou
         si.dwFlags |= STARTF_USESTDHANDLES;
     }
 
-    char cmd[256];
+    char cmd[1024];
     argv_to_string(argv, cmd, sizeof(cmd));
     dlog("exec %s", cmd);
     if (!CreateProcessA(NULL, cmd, NULL, NULL, bInheritHandles, flags, NULL, NULL, &si, &pi)) {

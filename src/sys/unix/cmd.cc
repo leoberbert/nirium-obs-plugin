@@ -53,7 +53,7 @@ cmd_execute(const char *path, const char *const argv[], pid_t *pid, char* out, s
         // parent close write side
         close(fd[1]); fd[1] = -1;
 
-        size_t n;
+        ssize_t n;
         if (out != NULL && out_size > 2) {
             n = read(fd[0], out, out_size - 1);
             if (n < 0 || n >= out_size) {

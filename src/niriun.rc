@@ -1,0 +1,22 @@
+1 VERSIONINFO
+FILEVERSION 0,1,0,0
+BEGIN
+  BLOCK "StringFileInfo"
+  BEGIN
+    BLOCK "040904B0"
+    BEGIN
+      VALUE "CompanyName", "Leonardo Berbert"
+      VALUE "FileDescription", "Niriun OBS Source Plugin"
+      VALUE "InternalName", "niriun-obs.dll"
+      VALUE "OriginalFilename", "niriun-obs.dll"
+      VALUE "ProductName", "Niriun"
+      VALUE "ProductVersion", "0.1.0"
+      VALUE "LegalCopyright", "DEV47APPS 2021-2026; Leonardo Berbert 2026; GPL-2.0-or-later"
+    END
+  END
+
+  BLOCK "VarFileInfo"
+  BEGIN
+    VALUE "Translation", 0x0409, 0x04B0
+  END
+END
