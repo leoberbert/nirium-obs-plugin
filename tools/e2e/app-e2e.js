@@ -3,10 +3,10 @@
 // (the plugin's "USB" device type). Same OBS setup as e2e.js.
 //
 //   adb install -r app-debug.apk, grant camera/microphone/notifications, open Niriun and press Start
-//   node tools/e2e/app-e2e.js --obs <portable OBS folder> [--serial emulator-5554] [--hevc] [--out <dir>]
+//   node tools/e2e/app-e2e.js --obs <portable OBS folder> [--serial emulator-5554] [--size 1280x720] [--hevc] [--out <dir>]
 //
-// Checks that the app's MediaCodec output (config packet + frames), Opus audio and tally work with the plugin, and
-// saves a screenshot of the phone with the tally border/label for each state.
+// Checks that the app's MediaCodec output (config packet + frames), Opus audio and tally work with the plugin. The
+// tally is read from the app's own labels (uiautomator); nothing from the phone screen is captured.
 
 const { execFileSync } = require('child_process');
 const fs = require('fs');
@@ -21,12 +21,19 @@ if (typeof args.obs !== 'string') {
 const OBS_DIR = path.resolve(args.obs);
 const OUT = path.resolve(typeof args.out === 'string' ? args.out : 'e2e-out');
 const SERIAL = typeof args.serial === 'string' ? args.serial : 'emulator-5554';
+const SIZE = typeof args.size === 'string' ? args.size : '1280x720';
 const { check, summary } = makeChecker();
 
-function phoneScreenshot(file) {
-  const png = execFileSync('adb', ['-s', SERIAL, 'exec-out', 'screencap', '-p'], { maxBuffer: 64 << 20 });
-  fs.writeFileSync(path.join(OUT, file), png);
+/** Visible text of the app, from uiautomator (the app's own labels only). */
+function phoneTexts() {
+  const file = '/sdcard/niriun-ui.xml';
+  execFileSync('adb', ['-s', SERIAL, 'shell', 'uiautomator', 'dump', file], { stdio: 'ignore' });
+  const xml = execFileSync('adb', ['-s', SERIAL, 'shell', 'cat', file], { maxBuffer: 16 << 20 }).toString('utf8');
+  execFileSync('adb', ['-s', SERIAL, 'shell', 'rm', file], { stdio: 'ignore' });
+  return [...xml.matchAll(/text="([^"]*)"/g)].map((m) => m[1]).filter(Boolean);
 }
+
+const tallyLabel = () => phoneTexts().find((t) => /^(ON AIR|AO VIVO|PREVIEW)\b/.test(t)) || '';
 
 async function main() {
   fs.mkdirSync(OUT, { recursive: true });
@@ -54,7 +61,7 @@ async function main() {
       inputName: 'Niriun1',
       inputKind: 'niriun_source',
       sceneItemEnabled: true,
-      inputSettings: { device_list: `adb:${SERIAL}`, cur_dev_type: 3, cur_dev_id: SERIAL, cur_dev_name: SERIAL, app_port: 4699, resolution_str: '1280x720', fps: 30, activated: true },
+      inputSettings: { device_list: `adb:${SERIAL}`, cur_dev_type: 3, cur_dev_id: SERIAL, cur_dev_name: SERIAL, app_port: 4699, resolution_str: SIZE, fps: 30, activated: true },
     });
 
     await sleep(8000); // a slow encoder (emulator) needs seconds for its first picture
@@ -62,20 +69,24 @@ async function main() {
     check('video from the app is decoded', size > 3000, `png base64 ${size} bytes`);
     const cams = (await obs.request('GetInputPropertiesListPropertyItems', { inputName: 'Niriun1', propertyName: 'camera' })).propertyItems;
     check('camera list comes from the app', cams.length > 0, JSON.stringify(cams.map((i) => i.itemName)));
-    console.log(`info  audio meter peak ${(obs.meters['Niriun1'] || 0).toFixed(4)} (an emulator microphone is silent or noise)`);
+    console.log(`info  audio meter peak ${(obs.meters['Niriun1'] || 0).toFixed(4)} (an emulator microphone is silent)`);
 
-    // tally: the app shows ON AIR / PREVIEW; the screenshots are for a human to look at
-    phoneScreenshot('phone-tally-program.png');
+    // tally: the app shows "ON AIR · <source>" / "PREVIEW · <source>" (read from its accessibility tree, no screenshots)
+    await sleep(1000);
+    let label = tallyLabel();
+    check('app shows ON AIR for the source on program', /^(ON AIR|AO VIVO) · Niriun1$/.test(label), JSON.stringify(label));
 
     await obs.request('SetCurrentProgramScene', { sceneName: 'Other' });
     await sleep(1500);
-    phoneScreenshot('phone-tally-off.png');
+    label = tallyLabel();
+    check('app shows no tally when the source leaves program', label === '', JSON.stringify(label));
 
     await obs.request('SetStudioModeEnabled', { studioModeEnabled: true });
     await sleep(500);
     await obs.request('SetCurrentPreviewScene', { sceneName: 'Cam' });
     await sleep(1500);
-    phoneScreenshot('phone-tally-preview.png');
+    label = tallyLabel();
+    check('app shows PREVIEW in Studio Mode', /^PREVIEW · Niriun1$/.test(label), JSON.stringify(label));
     await obs.request('SetStudioModeEnabled', { studioModeEnabled: false });
 
     // HEVC from the phone's own encoder (--hevc: the emulator's software HEVC encoder refuses the app's profile)
