@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 
-project(niriun-obs VERSION 0.1.3 LANGUAGES C CXX)
+project(niriun-obs VERSION 0.1.4 LANGUAGES C CXX)
 
 option(NIRIUN_BUILD_PLUGIN "Build the OBS Studio plugin (needs libobs and FFmpeg)" ON)
 option(NIRIUN_BUILD_TESTS "Build the protocol unit tests" ON)

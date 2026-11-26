@@ -540,7 +540,10 @@ bool NiriunSource::handle_packet(Session &s, niriun::Framer &framer, const std::
             s.got_hello = true;
             ilog("phone: \"%s\" (%s)", h.name.c_str(), h.uuid_hex().c_str());
             Discovery::instance().note(h.uuid_hex(), h.name, peer);
-            publish([&](Info &i) { i.phone = h.name; });
+            publish([&](Info &i) {
+                i.connected = true;
+                i.phone = h.name;
+            });
         }
         break;
     }
@@ -703,10 +706,9 @@ void NiriunSource::run_session(socket_t sock, const StartParams &sp)
     s.last_send_ms = niriun::now_ms();
     s.start_decoding();
 
-    publish([](Info &i) {
-        i = Info();
-        i.connected = true;
-    });
+    // "Connected" waits for the phone's hello: a TCP connect alone also succeeds when the phone's single slot is
+    // still busy with a previous computer (the connection waits in its accept backlog and nothing arrives).
+    publish([](Info &i) { i = Info(); });
     set_error("");
     ilog("connected to %s", peer.c_str());
 
